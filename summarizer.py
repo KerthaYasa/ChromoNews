@@ -1,3 +1,18 @@
+"""
+=============================================================================
+‼️ DEPRECATED — SUDAH TIDAK DIPAKAI DI app.py ‼️
+=============================================================================
+File ini adalah versi LAMA (full-AI summarization) sebelum migrasi arsitektur.
+Disimpan hanya sebagai referensi/perbandingan "before vs after" untuk laporan
+STKI, BUKAN bagian dari pipeline aktif.
+
+Pipeline AKTIF sekarang:
+  - Ekstraksi 5W1H: extraction/rule_based_5w1h.py  (algoritmik, tanpa AI)
+  - Parafrase akhir: paraphraser.py                (AI, hanya merangkai)
+
+Alasan migrasi: lihat docstring di extraction/patterns.py dan paraphraser.py.
+=============================================================================
+"""
 import os
 import json
 import google.generativeai as genai

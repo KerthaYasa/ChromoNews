@@ -6,7 +6,8 @@ from preprocess import preprocess_for_bm25
 from bm25_search import build_bm25_index, search_bm25
 from semantic_search import load_embedding_model, encode_corpus, search_semantic
 from hybrid_search import reciprocal_rank_fusion
-from summarizer import configure_gemini, summarize_articles, extract_5w1h
+from extraction import extract_5w1h_hybrid, load_ner_pipeline, load_qa_pipeline
+from paraphraser import configure_gemini, paraphrase_5w1h, _fallback_paragraph
 
 # --- KONFIGURASI HALAMAN STREAMLIT ---
 st.set_page_config(
@@ -162,6 +163,36 @@ st.markdown("""
         line-height: 1.4;
     }
 
+    /* --- Kolom Parafrase (Kanan) --- */
+    .paraphrase-box {
+        background: rgba(0, 210, 255, 0.03);
+        border-left: 3px solid #00d2ff;
+        border-radius: 0 8px 8px 0;
+        padding: 0.9rem 1.1rem;
+        color: #e2e8f0;
+        font-size: 0.92rem;
+        line-height: 1.65;
+        height: 100%;
+    }
+    .paraphrase-label {
+        color: #00d2ff;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
+        display: block;
+    }
+    .w5h1-label {
+        color: #a78bfa;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        margin-bottom: 0.3rem;
+        display: block;
+    }
+
     /* --- Streamlit Component Overrides --- */
     .stButton > button {
         background: linear-gradient(90deg, #00d2ff 0%, #7b2ff7 100%);
@@ -213,6 +244,47 @@ def load_semantic(_df):
     gc.collect()  # Bersihkan memori yang tidak terpakai
     return model, corpus_embeddings
 
+@st.cache_resource(show_spinner="🤖 Memuat Model NER (deteksi WHO)...")
+def load_ner_model():
+    """
+    Di-cache PERMANEN oleh Streamlit selama proses app hidup -- hanya
+    dieksekusi SEKALI (saat pertama kali dipanggil), bukan diulang tiap
+    user melakukan search. Run berikutnya (rerun Streamlit karena
+    interaksi user) langsung pakai resource dari cache ini, TIDAK reload.
+
+    Kalau loading gagal (exception), Streamlit TIDAK menyimpan exception
+    ke cache -- jadi rerun berikutnya akan otomatis dicoba lagi (berguna
+    kalau kamu baru saja `pip install` dependency yang sebelumnya hilang).
+    """
+    return load_ner_pipeline()
+
+@st.cache_resource(show_spinner="🤖 Memuat Model QA (fallback WHY/HOW)...")
+def load_qa_model():
+    """Sama seperti load_ner_model() di atas -- cache permanen, retry otomatis kalau gagal."""
+    return load_qa_pipeline()
+
+def get_hybrid_models():
+    """
+    Load KEDUA model hybrid (NER + QA) dalam SATU pemanggilan, dipakai SEKALI
+    di awal alur search -- bukan dicoba satu-satu tersebar di tengah proses
+    ekstraksi per-artikel. Masing-masing model di-try/except TERPISAH supaya
+    kalau salah satu gagal (mis. NER ok tapi QA gagal), yang lain tetap bisa
+    dipakai (graceful degradation, bukan all-or-nothing).
+    """
+    ner_pipeline, ner_error = None, None
+    try:
+        ner_pipeline = load_ner_model()
+    except Exception as e:
+        ner_error = str(e)
+
+    qa_pipeline, qa_error = None, None
+    try:
+        qa_pipeline = load_qa_model()
+    except Exception as e:
+        qa_error = str(e)
+
+    return ner_pipeline, ner_error, qa_pipeline, qa_error
+
 # --- INISIALISASI (BERTAHAP) ---
 df = load_data()
 if df is not None:
@@ -220,6 +292,13 @@ if df is not None:
     semantic_model, corpus_embeddings = load_semantic(df)
 else:
     bm25_index, semantic_model, corpus_embeddings = None, None, None
+
+# Eager-load model hybrid (NER + QA) di awal app, SEJAJAR dengan BM25/semantic
+# di atas -- bukan ditunda sampai user pertama kali search. Berkat
+# @st.cache_resource, ini hanya benar-benar dieksekusi SEKALI selama proses
+# Streamlit hidup; rerun berikutnya (tiap interaksi user) langsung pakai
+# hasil cache, prosesnya jadi ringan/instan.
+ner_pipeline, ner_load_error, qa_pipeline, qa_load_error = get_hybrid_models()
 
 # --- SIDEBAR: KONFIGURASI & INFO ---
 with st.sidebar:
@@ -242,7 +321,7 @@ with st.sidebar:
 
 # --- MAIN APP HEADER ---
 st.markdown('<h1 class="gradient-text">🧬 ChromoNews</h1>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">News Retrieval using Hybrid BM25 & Semantic Search with AI Agent for Temporal Event Summarization</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">News Retrieval using Hybrid BM25 & Semantic Search with Rule-Based 5W1H Extraction + AI Paraphrasing</div>', unsafe_allow_html=True)
 
 if df is None:
     st.stop() # Stop execution jika data gagal dimuat
@@ -283,16 +362,13 @@ with tab_dataset:
 # --- TAB 2: HASIL & RINGKASAN ---
 with tab_ringkasan:
     if search_button and query:
-        
-        # Validasi API Key jika ingin summarization
-        if not api_key_input:
-            st.warning("⚠️ Gemini API Key belum dimasukkan. Pencarian (Retrieval) akan tetap berjalan, tetapi fitur Summarization AI dan 5W1H dimatikan. Masukkan API Key di sidebar untuk mengaktifkan fitur AI.")
-        else:
-            try:
-                configure_gemini(api_key=api_key_input)
-            except Exception as e:
-                st.error(f"Gagal mengkonfigurasi Gemini API: {e}")
-        
+
+        # Catatan: validasi & konfigurasi Gemini API key dilakukan di tahap
+        # AI Paraphraser (setelah ekstraksi 5W1H algoritmik selesai),
+        # karena AI di arsitektur baru ini HANYA dipakai untuk merangkai
+        # hasil ekstraksi jadi paragraf natural -- bukan untuk retrieval
+        # ataupun ekstraksi 5W1H itu sendiri.
+
         # --- PROSES SEARCH (RETRIEVAL) ---
         with st.spinner("🔍 Mencari dokumen yang relevan (Hybrid Search)..."):
             start_time = time.time()
@@ -314,7 +390,7 @@ with tab_ringkasan:
             
         st.success(f"Ditemukan {len(hybrid_results)} artikel yang relevan dalam {retrieval_time:.2f} detik.")
         
-        # --- MENYIAPKAN DATA UNTUK SUMMARIZER & UI ---
+        # --- MENYIAPKAN DATA UNTUK EKSTRAKSI & UI ---
         retrieved_articles = []
         for doc_idx, rrf_score in hybrid_results:
             row = df.iloc[doc_idx]
@@ -324,78 +400,118 @@ with tab_ringkasan:
                 'content': row['content'],
                 'score': rrf_score
             })
-        
-        # --- PROSES AI: RINGKASAN TOPIK + EKSTRAKSI 5W1H ---
-        all_5w1h = []
-        if api_key_input and len(retrieved_articles) > 0:
-            # Ringkasan Topik (Abstraktif)
-            with st.spinner("🤖 AI sedang membaca artikel dan menyusun ringkasan..."):
+
+        # --- KONFIGURASI AI (untuk parafrase) ---
+        ai_ready = False
+        if api_key_input:
+            try:
+                configure_gemini(api_key=api_key_input)
+                ai_ready = True
+            except Exception as e:
+                st.error(f"Gagal mengkonfigurasi Gemini API: {e}")
+
+        # --- TAHAP 1: EKSTRAKSI 5W1H HYBRID (NER untuk WHO, rule-based multi untuk WHEN/WHERE, rule-based+QA fallback untuk WHY/HOW) ---
+        # ner_pipeline & qa_pipeline sudah di-load SEKALI di awal app (lihat
+        # get_hybrid_models() di bagian INISIALISASI) -- di sini TIDAK ada
+        # loading ulang, cuma dipakai (pipeline bisa None kalau gagal load).
+        status_msgs = []
+        if ner_pipeline is None:
+            status_msgs.append(f"NER (WHO): {ner_load_error or 'gagal dimuat'}")
+        if qa_pipeline is None:
+            status_msgs.append(f"QA (WHY/HOW fallback): {qa_load_error or 'gagal dimuat'}")
+        if status_msgs:
+            st.caption("⚠️ Model hybrid tidak aktif, pakai fallback rule-based/heuristik. Detail error: " + " | ".join(status_msgs))
+
+        with st.spinner("🔬 Mengekstrak 5W1H (hybrid: NER + rule-based + QA fallback)..."):
+            start_extract_time = time.time()
+            all_5w1h = []
+            for art in retrieved_articles:
+                article_data = {'title': art['title'], 'date': art['date'], 'content': art['content']}
+                all_5w1h.append(extract_5w1h_hybrid(article_data, ner_pipeline=ner_pipeline, qa_pipeline=qa_pipeline))
+            extract_time = time.time() - start_extract_time
+        st.caption(f"⚙️ Ekstraksi 5W1H (hybrid): {extract_time:.3f}s untuk {len(all_5w1h)} artikel")
+
+        # --- TAHAP 2: AI PARAPHRASER (merangkai hasil ekstraksi jadi paragraf natural) ---
+        all_paraphrases = []
+        if ai_ready:
+            with st.spinner("🤖 AI merangkai hasil ekstraksi menjadi paragraf natural..."):
                 start_ai_time = time.time()
-                articles_for_ai = [{'title': a['title'], 'date': a['date'], 'content': a['content']} for a in retrieved_articles]
-                summary = summarize_articles(articles_for_ai, query)
+                for art, w5h1 in zip(retrieved_articles, all_5w1h):
+                    paragraph = paraphrase_5w1h(w5h1, title=art['title'], query=query)
+                    all_paraphrases.append(paragraph)
                 ai_time = time.time() - start_ai_time
-            
-            # Menampilkan Ringkasan Topik
-            st.markdown("### 📋 Ringkasan Topik")
-            st.markdown(f'<div class="summary-section">{summary.get("abstract_summary", "Ringkasan tidak tersedia.")}</div>', unsafe_allow_html=True)
-            st.caption(f"AI Generation Time: {ai_time:.2f}s")
-            st.markdown("---")
-            
-            # Ekstraksi 5W1H untuk setiap artikel
-            with st.spinner("🔬 AI sedang menganalisis 5W1H dari setiap artikel..."):
-                start_5w1h_time = time.time()
-                for art in retrieved_articles:
-                    article_data = {'title': art['title'], 'date': art['date'], 'content': art['content']}
-                    result_5w1h = extract_5w1h(article_data, query)
-                    all_5w1h.append(result_5w1h)
-                time_5w1h = time.time() - start_5w1h_time
-            st.caption(f"5W1H Extraction Time: {time_5w1h:.2f}s")
-        
-        # --- MENAMPILKAN ARTIKEL DENGAN 5W1H INLINE ---
+            st.caption(f"🤖 AI Paraphrasing: {ai_time:.2f}s untuk {len(all_paraphrases)} artikel")
+        else:
+            st.info("ℹ️ Gemini API Key belum dimasukkan — paragraf di kolom kanan ditampilkan dari penggabungan otomatis hasil ekstraksi (tanpa AI). Masukkan API Key di sidebar untuk paragraf yang lebih natural.")
+            for art, w5h1 in zip(retrieved_articles, all_5w1h):
+                all_paraphrases.append(_fallback_paragraph(w5h1, art['title']))
+
+        # --- MENAMPILKAN ARTIKEL: KIRI 5W1H TERSTRUKTUR | KANAN PARAGRAF NATURAL ---
         st.markdown(f"### 📑 Top {len(retrieved_articles)} Artikel Relevan")
-        
+
         for i, art in enumerate(retrieved_articles):
-            # Format snippet: ambil 200 karakter pertama
-            snippet = str(art['content'])[:200].replace('\n', ' ') + "..."
-            
-            # Build 5W1H HTML jika tersedia
-            w5h1_html = ""
-            if i < len(all_5w1h):
-                item = all_5w1h[i]
-                w5h1_html = (
-'<div class="w5h1-grid">'
-'<div class="w5h1-item"><span class="w5h1-badge badge-what">WHAT</span>'
-f'<span class="w5h1-text">{item.get("what", "Tidak terdeteksi")}</span></div>'
-'<div class="w5h1-item"><span class="w5h1-badge badge-who">WHO</span>'
-f'<span class="w5h1-text">{item.get("who", "Tidak terdeteksi")}</span></div>'
-'<div class="w5h1-item"><span class="w5h1-badge badge-when">WHEN</span>'
-f'<span class="w5h1-text">{item.get("when", "Tidak terdeteksi")}</span></div>'
-'<div class="w5h1-item"><span class="w5h1-badge badge-where">WHERE</span>'
-f'<span class="w5h1-text">{item.get("where", "Tidak terdeteksi")}</span></div>'
-'<div class="w5h1-item"><span class="w5h1-badge badge-why">WHY</span>'
-f'<span class="w5h1-text">{item.get("why", "Tidak terdeteksi")}</span></div>'
-'<div class="w5h1-item"><span class="w5h1-badge badge-how">HOW</span>'
-f'<span class="w5h1-text">{item.get("how", "Tidak terdeteksi")}</span></div>'
-'</div>'
-                )
-            
-            # HTML untuk artikel (flat modern, tanpa card)
-            article_html = (
-f'<div class="article-section">'
+            item = all_5w1h[i]
+            paragraph = all_paraphrases[i] if i < len(all_paraphrases) else ""
+
+            # Header artikel (judul + meta)
+            header_html = (
+f'<div class="article-section" style="margin-bottom:0.6rem;">'
 f'<div class="article-title">{art["title"]}</div>'
 f'<div class="article-meta">'
 f'<span class="article-date">🕒 {art["date"]}</span>'
 f'<span class="article-score">RRF: {art["score"]:.4f}</span>'
 f'</div>'
-f'<div class="article-snippet">{snippet}</div>'
-f'{w5h1_html}'
 f'</div>'
             )
-            st.markdown(article_html, unsafe_allow_html=True)
-            
-            # Opsi baca selengkapnya via expander Streamlit standar
-            with st.expander("📖 Baca Artikel Penuh"):
+            st.markdown(header_html, unsafe_allow_html=True)
+
+            col_left, col_right = st.columns([1, 1])
+
+            with col_left:
+                def _join(val):
+                    if isinstance(val, list):
+                        vals = [v for v in val if v and "Tidak disebutkan" not in v]
+                        return ", ".join(vals) if vals else "Tidak terdeteksi"
+                    return val if val else "Tidak terdeteksi"
+
+                why_src = item.get("why_source", "")
+                how_src = item.get("how_source", "")
+                why_tag = " <em style='opacity:0.6;font-size:0.7em;'>(via QA model)</em>" if why_src == "qa-model" else ""
+                how_tag = " <em style='opacity:0.6;font-size:0.7em;'>(via QA model)</em>" if how_src == "qa-model" else ""
+
+                w5h1_html = (
+'<div class="w5h1-grid" style="grid-template-columns:1fr;">'
+'<span class="w5h1-label">🔍 5W+1H (Hybrid: NER + Rule-based + QA fallback)</span>'
+'<div class="w5h1-item"><span class="w5h1-badge badge-what">WHAT</span>'
+f'<span class="w5h1-text">{item.get("what", "Tidak terdeteksi")}</span></div>'
+'<div class="w5h1-item"><span class="w5h1-badge badge-who">WHO</span>'
+f'<span class="w5h1-text">{_join(item.get("who"))}</span></div>'
+'<div class="w5h1-item"><span class="w5h1-badge badge-when">WHEN</span>'
+f'<span class="w5h1-text">{_join(item.get("when"))}</span></div>'
+'<div class="w5h1-item"><span class="w5h1-badge badge-where">WHERE</span>'
+f'<span class="w5h1-text">{_join(item.get("where"))}</span></div>'
+'<div class="w5h1-item"><span class="w5h1-badge badge-why">WHY</span>'
+f'<span class="w5h1-text">{item.get("why", "Tidak terdeteksi")}{why_tag}</span></div>'
+'<div class="w5h1-item"><span class="w5h1-badge badge-how">HOW</span>'
+f'<span class="w5h1-text">{item.get("how", "Tidak terdeteksi")}{how_tag}</span></div>'
+'</div>'
+                )
+                st.markdown(w5h1_html, unsafe_allow_html=True)
+
+            with col_right:
+                paraphrase_html = (
+'<div class="paraphrase-box">'
+'<span class="paraphrase-label">📝 Ringkasan Natural (AI Paraphrase)</span>'
+f'{paragraph}'
+'</div>'
+                )
+                st.markdown(paraphrase_html, unsafe_allow_html=True)
+
+            # Tombol "Baca Selengkapnya"
+            with st.expander("📖 Baca Selengkapnya"):
                 st.write(art['content'])
+
+            st.markdown("---")
 
     elif search_button and not query:
         st.warning("Silakan masukkan kata kunci pencarian terlebih dahulu.")
