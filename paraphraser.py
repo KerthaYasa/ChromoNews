@@ -76,13 +76,13 @@ def _fallback_paragraph(w5h1, title):
     if who and "Tidak disebutkan" not in who:
         parts.append(f"Pihak yang terlibat: {who}.")
     if when and "Tidak disebutkan" not in when:
-        parts.append(f"Peristiwa ini terjadi pada {when}.")
+        parts.append(when + ".")
     if where and "Tidak disebutkan" not in where:
-        parts.append(f"Lokasi terkait: {where}.")
+        parts.append(where + ".")
     if why and "Tidak disebutkan" not in why:
-        parts.append(f"Hal ini dipicu oleh {why}.")
+        parts.append(why)
     if how and "Tidak disebutkan" not in how:
-        parts.append(f"Prosesnya dilakukan {how}.")
+        parts.append(how)
 
     if not parts:
         return title or "Ringkasan tidak tersedia."

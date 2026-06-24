@@ -6,7 +6,7 @@ from preprocess import preprocess_for_bm25
 from bm25_search import build_bm25_index, search_bm25
 from semantic_search import load_embedding_model, encode_corpus, search_semantic
 from hybrid_search import reciprocal_rank_fusion
-from extraction import extract_5w1h_hybrid, load_ner_pipeline, load_qa_pipeline
+from extraction.rule_based_5w1h import extract_5w1h
 from paraphraser import configure_gemini, paraphrase_5w1h, _fallback_paragraph
 
 # --- KONFIGURASI HALAMAN STREAMLIT ---
@@ -17,128 +17,345 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS FLAT MODERN (TANPA CARD / GLASSMORPHISM) ---
-st.markdown("""
+if 'theme' not in st.session_state:
+    st.session_state.theme = 'dark'
+
+if 'active_tab' not in st.session_state:
+    st.session_state.active_tab = 0
+
+if 'search_triggered' not in st.session_state:
+    st.session_state.search_triggered = False
+
+# --- THEME CONFIGURATION ---
+is_dark = st.session_state.theme == 'dark'
+
+if is_dark:
+    # Dark mode colors
+    app_bg = "#0a0e17"
+    sidebar_bg = "#111827"
+    text_color = "#e2e8f0"
+    card_bg = "rgba(255, 255, 255, 0.04)"
+    card_hover = "rgba(255, 255, 255, 0.07)"
+    sub_color = "#94a3b8"
+    border_color = "rgba(255, 255, 255, 0.08)"
+    input_bg = "rgba(255, 255, 255, 0.06)"
+    input_border = "rgba(255, 255, 255, 0.12)"
+    tab_bg = "rgba(255, 255, 255, 0.03)"
+    tab_hover = "rgba(255, 255, 255, 0.06)"
+    expander_bg = "rgba(255, 255, 255, 0.03)"
+    header_bg = "#0a0e17"
+    dataframe_header_bg = "rgba(255,255,255,0.05)"
+    dataframe_cell_bg = "rgba(255,255,255,0.02)"
+    divider_color = "rgba(255, 255, 255, 0.06)"
+    scrollbar_thumb = "rgba(255, 255, 255, 0.15)"
+else:
+    # Light mode colors
+    app_bg = "#f8f9fc"
+    sidebar_bg = "#ffffff"
+    text_color = "#1a1a2e"
+    card_bg = "rgba(0, 0, 0, 0.02)"
+    card_hover = "rgba(0, 0, 0, 0.04)"
+    sub_color = "#64748b"
+    border_color = "rgba(0, 0, 0, 0.08)"
+    input_bg = "#ffffff"
+    input_border = "rgba(0, 0, 0, 0.15)"
+    tab_bg = "rgba(0, 0, 0, 0.02)"
+    tab_hover = "rgba(0, 0, 0, 0.04)"
+    expander_bg = "rgba(0, 0, 0, 0.02)"
+    header_bg = "#f8f9fc"
+    dataframe_header_bg = "rgba(0,0,0,0.04)"
+    dataframe_cell_bg = "#ffffff"
+    divider_color = "rgba(0, 0, 0, 0.08)"
+    scrollbar_thumb = "rgba(0, 0, 0, 0.15)"
+
+# --- MEGA CSS: Override EVERYTHING ---
+st.markdown(f"""
 <style>
-    /* Import Google Fonts */
+    /* ===== GOOGLE FONTS ===== */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;800&display=swap');
 
-    /* Global Typography Override */
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-    h1, h2, h3, h4, h5, h6 {
-        font-family: 'Outfit', sans-serif !important;
-    }
+    /* ===== CSS CUSTOM PROPERTIES (Streamlit reads these) ===== */
+    :root {{
+        --background-color: {app_bg} !important;
+        --secondary-background-color: {sidebar_bg} !important;
+        --text-color: {text_color} !important;
+        --font: 'Inter', sans-serif !important;
+    }}
 
-    /* Gradient Line Accent for Main Header */
-    .gradient-text {
+    /* ===== GLOBAL RESET ===== */
+    html, body, [class*="css"] {{
+        font-family: 'Inter', sans-serif !important;
+        color: {text_color} !important;
+    }}
+
+    /* ===== MAIN APP BACKGROUND ===== */
+    .stApp,
+    .stApp > header,
+    .main .block-container {{
+        background-color: {app_bg} !important;
+        color: {text_color} !important;
+    }}
+
+    /* ===== TOP HEADER BAR ===== */
+    [data-testid="stHeader"],
+    header[data-testid="stHeader"] {{
+        background-color: {app_bg} !important;
+        backdrop-filter: none !important;
+    }}
+
+    /* ===== SIDEBAR ===== */
+    [data-testid="stSidebar"],
+    [data-testid="stSidebar"] > div:first-child {{
+        background-color: {sidebar_bg} !important;
+        border-right: 1px solid {border_color} !important;
+    }}
+    [data-testid="stSidebar"] * {{
+        color: {text_color} !important;
+    }}
+    [data-testid="stSidebar"] hr {{
+        border-color: {divider_color} !important;
+    }}
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] .stMarkdown p,
+    [data-testid="stSidebar"] .stMarkdown h3,
+    [data-testid="stSidebar"] .stMarkdown li {{
+        color: {text_color} !important;
+    }}
+
+    /* ===== ALL TEXT ELEMENTS ===== */
+    h1, h2, h3, h4, h5, h6 {{
+        color: {text_color} !important;
+        font-family: 'Outfit', sans-serif !important;
+    }}
+    p, span, div, label, li {{
+        color: {text_color};
+    }}
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li,
+    [data-testid="stMarkdownContainer"] span {{
+        color: {text_color} !important;
+    }}
+    .stMarkdown {{
+        color: {text_color} !important;
+    }}
+
+    /* ===== MAIN HEADER GRADIENT ===== */
+    .gradient-text {{
         background: linear-gradient(90deg, #00d2ff 0%, #7b2ff7 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         font-weight: 800;
         font-size: 3rem;
         margin-bottom: 0px;
-    }
-    .sub-header {
-        color: #a0aec0;
+    }}
+    .sub-header {{
+        color: {sub_color} !important;
+        -webkit-text-fill-color: {sub_color} !important;
         font-size: 1.1rem;
         margin-bottom: 2rem;
         font-weight: 300;
-    }
+    }}
 
-    /* --- Flat Article Section --- */
-    .article-section {
-        border-left: 3px solid #7b2ff7;
-        padding: 1.2rem 1.5rem;
-        margin-bottom: 1.5rem;
-        background: rgba(255, 255, 255, 0.02);
-        border-radius: 0 8px 8px 0;
-        transition: background 0.2s ease;
-    }
-    .article-section:hover {
-        background: rgba(255, 255, 255, 0.04);
-    }
-    .article-title {
-        color: #e2e8f0;
-        font-weight: 600;
-        font-size: 1.15rem;
-        margin-bottom: 0.4rem;
-        font-family: 'Outfit', sans-serif;
-    }
-    .article-meta {
+    /* ===== THEME TOGGLE STYLING ===== */
+    .theme-switch-container {{
         display: flex;
         align-items: center;
-        gap: 1rem;
-        margin-bottom: 0.8rem;
-    }
-    .article-date {
-        color: #00d2ff;
-        font-size: 0.82rem;
+        justify-content: space-between;
+        padding: 10px 16px;
+        background: {card_bg};
+        border: 1px solid {border_color};
+        border-radius: 12px;
+        margin-bottom: 0.3rem;
+    }}
+    .theme-switch-label {{
+        font-size: 0.9rem;
         font-weight: 500;
-    }
-    .article-score {
-        color: #94a3b8;
-        font-size: 0.78rem;
-    }
-    .article-snippet {
-        color: #cbd5e1;
-        font-size: 0.93rem;
-        line-height: 1.6;
-        margin-bottom: 0.8rem;
-    }
+        color: {text_color} !important;
+    }}
+    .theme-switch-icon {{
+        font-size: 1.3rem;
+    }}
 
-    /* --- Flat Metric Cards (Dataset Tab) --- */
-    .metric-card {
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid rgba(255, 255, 255, 0.05);
+    /* Style the st.toggle switch */
+    [data-testid="stSidebar"] .stToggle > label {{
+        color: {text_color} !important;
+    }}
+    [data-testid="stSidebar"] .stToggle > div > div {{
+        color: {text_color} !important;
+    }}
+
+    /* ===== INPUT ELEMENTS ===== */
+    .stTextInput > div > div > input,
+    [data-testid="stSidebar"] .stTextInput > div > div > input {{
+        background-color: {input_bg} !important;
+        border: 1px solid {input_border} !important;
+        color: {text_color} !important;
+        border-radius: 8px !important;
+    }}
+    .stTextInput > div > div > input:focus {{
+        border-color: #00d2ff !important;
+        box-shadow: 0 0 0 1px #00d2ff !important;
+    }}
+    .stTextInput > div > div > input::placeholder {{
+        color: {sub_color} !important;
+        opacity: 0.7 !important;
+    }}
+
+    /* Number input */
+    .stNumberInput > div > div > input,
+    [data-testid="stSidebar"] .stNumberInput > div > div > input {{
+        background-color: {input_bg} !important;
+        border: 1px solid {input_border} !important;
+        color: {text_color} !important;
+    }}
+    .stNumberInput button {{
+        color: {text_color} !important;
+        border-color: {input_border} !important;
+        background-color: {card_bg} !important;
+    }}
+
+    /* Slider */
+    [data-testid="stSidebar"] .stSlider > div {{
+        color: {text_color} !important;
+    }}
+    [data-testid="stSidebar"] .stSlider p {{
+        color: {text_color} !important;
+    }}
+
+    /* ===== SEARCH BUTTON ===== */
+    .stButton > button {{
+        background: linear-gradient(90deg, #00d2ff 0%, #7b2ff7 100%) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        padding: 0.5rem 2rem !important;
+        transition: all 0.3s ease !important;
+    }}
+    .stButton > button:hover {{
+        transform: scale(1.02) !important;
+        box-shadow: 0 5px 15px rgba(123, 47, 247, 0.4) !important;
+        color: white !important;
+    }}
+    .stButton > button:active,
+    .stButton > button:focus {{
+        color: white !important;
+        background: linear-gradient(90deg, #00d2ff 0%, #7b2ff7 100%) !important;
+    }}
+
+    /* ===== TAB STYLING ===== */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 0 !important;
+        background: {tab_bg} !important;
+        border-radius: 10px !important;
+        padding: 4px !important;
+        border: 1px solid {border_color} !important;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        color: {sub_color} !important;
+        border-radius: 8px !important;
+        padding: 8px 20px !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease !important;
+        background: transparent !important;
+    }}
+    .stTabs [data-baseweb="tab"]:hover {{
+        background: {tab_hover} !important;
+        color: {text_color} !important;
+    }}
+    .stTabs [aria-selected="true"] {{
+        background: linear-gradient(135deg, rgba(0, 210, 255, 0.15) 0%, rgba(123, 47, 247, 0.15) 100%) !important;
+        color: {text_color} !important;
+        font-weight: 600 !important;
+    }}
+    .stTabs [data-baseweb="tab-highlight"] {{
+        background: linear-gradient(90deg, #00d2ff, #7b2ff7) !important;
+        height: 3px !important;
+        border-radius: 2px !important;
+    }}
+    .stTabs [data-baseweb="tab-border"] {{
+        display: none !important;
+    }}
+
+    /* ===== METRIC CARDS ===== */
+    .metric-card {{
+        background: {card_bg};
+        border: 1px solid {border_color};
         border-radius: 12px;
         padding: 1.5rem;
         text-align: center;
         border-bottom: 3px solid #7b2ff7;
-    }
-    .metric-value {
+        transition: all 0.3s ease;
+    }}
+    .metric-card:hover {{
+        transform: translateY(-2px);
+        box-shadow: 0 4px 20px rgba(123, 47, 247, 0.15);
+    }}
+    .metric-value {{
         font-size: 2rem;
         font-weight: 800;
-        color: #ffffff;
+        color: {text_color} !important;
         font-family: 'Outfit', sans-serif;
-    }
-    .metric-label {
+    }}
+    .metric-label {{
         font-size: 0.9rem;
-        color: #94a3b8;
+        color: {sub_color} !important;
         text-transform: uppercase;
         letter-spacing: 1px;
         margin-top: 0.5rem;
-    }
+    }}
 
-    /* --- Flat Ringkasan Topik Section --- */
-    .summary-section {
-        border-left: 3px solid #00d2ff;
+    /* ===== ARTICLE SECTIONS ===== */
+    .article-section {{
+        border-left: 3px solid #7b2ff7;
         padding: 1.2rem 1.5rem;
         margin-bottom: 1.5rem;
-        color: #e2e8f0;
-        line-height: 1.7;
-        font-size: 0.95rem;
-        background: rgba(0, 210, 255, 0.03);
+        background: {card_bg};
         border-radius: 0 8px 8px 0;
-    }
+        transition: background 0.2s ease;
+    }}
+    .article-section:hover {{
+        background: {card_hover};
+    }}
+    .article-title {{
+        color: {text_color} !important;
+        font-weight: 600;
+        font-size: 1.15rem;
+        margin-bottom: 0.4rem;
+        font-family: 'Outfit', sans-serif;
+    }}
+    .article-meta {{
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 0.8rem;
+    }}
+    .article-date {{
+        color: #00d2ff !important;
+        font-size: 0.82rem;
+        font-weight: 500;
+    }}
+    .article-score {{
+        color: {sub_color} !important;
+        font-size: 0.78rem;
+    }}
 
-    /* --- 5W1H Inline Grid --- */
-    .w5h1-grid {
+    /* ===== 5W1H GRID ===== */
+    .w5h1-grid {{
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 0.5rem;
         margin-top: 0.6rem;
-    }
-    .w5h1-item {
+    }}
+    .w5h1-item {{
         display: flex;
         align-items: flex-start;
         gap: 0.5rem;
         padding: 0.45rem 0.7rem;
         border-radius: 6px;
-        background: rgba(255, 255, 255, 0.02);
-    }
-    .w5h1-badge {
+        background: {card_bg};
+    }}
+    .w5h1-badge {{
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -150,73 +367,125 @@ st.markdown("""
         font-family: 'Outfit', sans-serif;
         flex-shrink: 0;
         letter-spacing: 0.5px;
-    }
-    .badge-what  { background: rgba(0, 210, 255, 0.12); color: #00d2ff; }
-    .badge-who   { background: rgba(123, 47, 247, 0.12); color: #a78bfa; }
-    .badge-when  { background: rgba(16, 185, 129, 0.12); color: #10b981; }
-    .badge-where { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-    .badge-why   { background: rgba(239, 68, 68, 0.12);  color: #ef4444; }
-    .badge-how   { background: rgba(236, 72, 153, 0.12); color: #ec4899; }
-    .w5h1-text {
-        color: #cbd5e1;
+    }}
+    .badge-what  {{ background: rgba(0, 210, 255, 0.12); color: #00d2ff !important; }}
+    .badge-who   {{ background: rgba(123, 47, 247, 0.12); color: #a78bfa !important; }}
+    .badge-when  {{ background: rgba(16, 185, 129, 0.12); color: #10b981 !important; }}
+    .badge-where {{ background: rgba(245, 158, 11, 0.12); color: #f59e0b !important; }}
+    .badge-why   {{ background: rgba(239, 68, 68, 0.12);  color: #ef4444 !important; }}
+    .badge-how   {{ background: rgba(236, 72, 153, 0.12); color: #ec4899 !important; }}
+    .w5h1-text {{
+        color: {text_color} !important;
         font-size: 0.85rem;
         line-height: 1.4;
-    }
-
-    /* --- Kolom Parafrase (Kanan) --- */
-    .paraphrase-box {
-        background: rgba(0, 210, 255, 0.03);
-        border-left: 3px solid #00d2ff;
-        border-radius: 0 8px 8px 0;
-        padding: 0.9rem 1.1rem;
-        color: #e2e8f0;
-        font-size: 0.92rem;
-        line-height: 1.65;
-        height: 100%;
-    }
-    .paraphrase-label {
-        color: #00d2ff;
-        font-size: 0.72rem;
-        font-weight: 700;
-        letter-spacing: 1px;
-        text-transform: uppercase;
-        margin-bottom: 0.5rem;
-        display: block;
-    }
-    .w5h1-label {
-        color: #a78bfa;
+    }}
+    .w5h1-label {{
+        color: #a78bfa !important;
         font-size: 0.72rem;
         font-weight: 700;
         letter-spacing: 1px;
         text-transform: uppercase;
         margin-bottom: 0.3rem;
         display: block;
-    }
+    }}
 
-    /* --- Streamlit Component Overrides --- */
-    .stButton > button {
-        background: linear-gradient(90deg, #00d2ff 0%, #7b2ff7 100%);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        padding: 0.5rem 2rem;
-        transition: all 0.3s ease;
-    }
-    .stButton > button:hover {
-        transform: scale(1.02);
-        box-shadow: 0 5px 15px rgba(123, 47, 247, 0.4);
-    }
-    .stTextInput > div > div > input {
-        background-color: rgba(255,255,255,0.05);
-        border: 1px solid rgba(255,255,255,0.1);
-        color: white;
-        border-radius: 8px;
-    }
-    .stTextInput > div > div > input:focus {
-        border-color: #00d2ff;
-        box-shadow: 0 0 0 1px #00d2ff;
-    }
+    /* ===== PARAPHRASE BOX ===== */
+    .paraphrase-box {{
+        background: rgba(0, 210, 255, 0.03);
+        border-left: 3px solid #00d2ff;
+        border-radius: 0 8px 8px 0;
+        padding: 0.9rem 1.1rem;
+        color: {text_color} !important;
+        font-size: 0.92rem;
+        line-height: 1.65;
+        height: 100%;
+    }}
+    .paraphrase-label {{
+        color: #00d2ff !important;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
+        display: block;
+    }}
+
+    /* ===== DATAFRAME / TABLE ===== */
+    [data-testid="stDataFrame"] {{
+        border-radius: 8px !important;
+        overflow: hidden !important;
+    }}
+    [data-testid="stDataFrame"] > div {{
+        background: {card_bg} !important;
+    }}
+    /* Override Glide Data Grid (Streamlit's dataframe renderer) */
+    [data-testid="stDataFrame"] canvas {{
+        border-radius: 8px !important;
+    }}
+
+    /* ===== DIVIDERS / HORIZONTAL RULES ===== */
+    hr, .stDivider {{
+        border-color: {divider_color} !important;
+    }}
+    .main hr {{
+        border-color: {divider_color} !important;
+    }}
+
+    /* ===== EXPANDER ===== */
+    .streamlit-expanderHeader {{
+        background: {expander_bg} !important;
+        border-radius: 8px !important;
+        color: {text_color} !important;
+    }}
+    details {{
+        border-color: {border_color} !important;
+    }}
+    [data-testid="stExpander"] {{
+        border-color: {border_color} !important;
+    }}
+    [data-testid="stExpander"] summary {{
+        color: {text_color} !important;
+    }}
+    [data-testid="stExpander"] div[role="button"] p {{
+        color: {text_color} !important;
+    }}
+
+    /* ===== ALERTS (Success, Info, Warning) ===== */
+    [data-testid="stAlert"] {{
+        border-radius: 8px !important;
+    }}
+    .stSuccess, .stAlert {{
+        color: {text_color} !important;
+    }}
+
+    /* ===== SCROLLBAR ===== */
+    ::-webkit-scrollbar {{
+        width: 8px;
+        height: 8px;
+    }}
+    ::-webkit-scrollbar-track {{
+        background: transparent;
+    }}
+    ::-webkit-scrollbar-thumb {{
+        background: {scrollbar_thumb};
+        border-radius: 4px;
+    }}
+    ::-webkit-scrollbar-thumb:hover {{
+        background: {sub_color};
+    }}
+
+    /* ===== TOOLTIP / HELP ICONS ===== */
+    [data-testid="stTooltipIcon"] {{
+        color: {sub_color} !important;
+    }}
+
+    /* ===== BOTTOM TOOLBAR / FOOTER ===== */
+    footer {{
+        display: none !important;
+    }}
+    .viewerBadge_container__r5tak {{
+        display: none !important;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -244,47 +513,6 @@ def load_semantic(_df):
     gc.collect()  # Bersihkan memori yang tidak terpakai
     return model, corpus_embeddings
 
-@st.cache_resource(show_spinner="🤖 Memuat Model NER (deteksi WHO)...")
-def load_ner_model():
-    """
-    Di-cache PERMANEN oleh Streamlit selama proses app hidup -- hanya
-    dieksekusi SEKALI (saat pertama kali dipanggil), bukan diulang tiap
-    user melakukan search. Run berikutnya (rerun Streamlit karena
-    interaksi user) langsung pakai resource dari cache ini, TIDAK reload.
-
-    Kalau loading gagal (exception), Streamlit TIDAK menyimpan exception
-    ke cache -- jadi rerun berikutnya akan otomatis dicoba lagi (berguna
-    kalau kamu baru saja `pip install` dependency yang sebelumnya hilang).
-    """
-    return load_ner_pipeline()
-
-@st.cache_resource(show_spinner="🤖 Memuat Model QA (fallback WHY/HOW)...")
-def load_qa_model():
-    """Sama seperti load_ner_model() di atas -- cache permanen, retry otomatis kalau gagal."""
-    return load_qa_pipeline()
-
-def get_hybrid_models():
-    """
-    Load KEDUA model hybrid (NER + QA) dalam SATU pemanggilan, dipakai SEKALI
-    di awal alur search -- bukan dicoba satu-satu tersebar di tengah proses
-    ekstraksi per-artikel. Masing-masing model di-try/except TERPISAH supaya
-    kalau salah satu gagal (mis. NER ok tapi QA gagal), yang lain tetap bisa
-    dipakai (graceful degradation, bukan all-or-nothing).
-    """
-    ner_pipeline, ner_error = None, None
-    try:
-        ner_pipeline = load_ner_model()
-    except Exception as e:
-        ner_error = str(e)
-
-    qa_pipeline, qa_error = None, None
-    try:
-        qa_pipeline = load_qa_model()
-    except Exception as e:
-        qa_error = str(e)
-
-    return ner_pipeline, ner_error, qa_pipeline, qa_error
-
 # --- INISIALISASI (BERTAHAP) ---
 df = load_data()
 if df is not None:
@@ -293,15 +521,32 @@ if df is not None:
 else:
     bm25_index, semantic_model, corpus_embeddings = None, None, None
 
-# Eager-load model hybrid (NER + QA) di awal app, SEJAJAR dengan BM25/semantic
-# di atas -- bukan ditunda sampai user pertama kali search. Berkat
-# @st.cache_resource, ini hanya benar-benar dieksekusi SEKALI selama proses
-# Streamlit hidup; rerun berikutnya (tiap interaksi user) langsung pakai
-# hasil cache, prosesnya jadi ringan/instan.
-ner_pipeline, ner_load_error, qa_pipeline, qa_load_error = get_hybrid_models()
-
 # --- SIDEBAR: KONFIGURASI & INFO ---
 with st.sidebar:
+    # --- THEME TOGGLE (Clean single switch) ---
+    st.markdown("### 🌗 Tema Tampilan")
+    
+    # Render visual indicator
+    current_icon = "🌙" if is_dark else "☀️"
+    current_label = "Mode Gelap" if is_dark else "Mode Terang"
+    st.markdown(f"""
+    <div class="theme-switch-container">
+        <span class="theme-switch-label">{current_label}</span>
+        <span class="theme-switch-icon">{current_icon}</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Use st.toggle for the actual switch
+    use_dark = st.toggle(
+        "Mode Gelap",
+        value=is_dark,
+        label_visibility="collapsed"
+    )
+    if use_dark != is_dark:
+        st.session_state.theme = 'dark' if use_dark else 'light'
+        st.rerun()
+
+    st.markdown("---")
     st.markdown("### ⚙️ Konfigurasi")
     api_key_input = st.text_input("Gemini API Key", type="password", placeholder="Masukkan API Key Anda...", help="Diperlukan untuk fitur Summarization")
     
@@ -321,26 +566,36 @@ with st.sidebar:
 
 # --- MAIN APP HEADER ---
 st.markdown('<h1 class="gradient-text">🧬 ChromoNews</h1>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">News Retrieval using Hybrid BM25 & Semantic Search with Rule-Based 5W1H Extraction + AI Paraphrasing</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Platform Pencarian Berita Hybrid dengan Ekstraksi Terstruktur & Ringkasan AI</div>', unsafe_allow_html=True)
 
 if df is None:
-    st.stop() # Stop execution jika data gagal dimuat
+    st.stop()
 
 # --- SEARCH BAR ---
 search_col1, search_col2 = st.columns([5, 1])
 with search_col1:
     query = st.text_input("🔍 Cari berita...", placeholder="Ketik topik berita, tokoh, atau peristiwa...", label_visibility="collapsed")
 with search_col2:
-    search_button = st.button("Search", use_container_width=True)
+    search_button = st.button("🔍 Search", use_container_width=True)
+
+# --- AUTO SWITCH TAB ON SEARCH ---
+if search_button and query:
+    st.session_state.active_tab = 1
+    st.session_state.search_triggered = True
+
+# Determine active tab index
+active_tab_index = st.session_state.active_tab
 
 # --- TABS ---
-tab_dataset, tab_ringkasan = st.tabs(["📂 Dataset", "📝 Hasil & Ringkasan"])
+if active_tab_index == 1:
+    tab_ringkasan, tab_dataset = st.tabs(["📝 Hasil & Ringkasan", "📂 Dataset"])
+else:
+    tab_dataset, tab_ringkasan = st.tabs(["📂 Dataset", "📝 Hasil & Ringkasan"])
 
-# --- TAB 1: DATASET ---
+# --- TAB: DATASET ---
 with tab_dataset:
     st.markdown("### Informasi Dataset")
     
-    # Metric Cards
     m_col1, m_col2, m_col3 = st.columns(3)
     with m_col1:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{len(df)}</div><div class="metric-label">Total Berita</div></div>', unsafe_allow_html=True)
@@ -350,7 +605,6 @@ with tab_dataset:
         avg_len = int(df['content'].str.len().mean())
         st.markdown(f'<div class="metric-card"><div class="metric-value">{avg_len}</div><div class="metric-label">Rata-rata Karakter</div></div>', unsafe_allow_html=True)
     
-    # Dataframe Display
     display_df = df.copy()
     st.dataframe(
         display_df[['date', 'title', 'content']],
@@ -359,38 +613,21 @@ with tab_dataset:
         height=400
     )
 
-# --- TAB 2: HASIL & RINGKASAN ---
+# --- TAB: HASIL & RINGKASAN ---
 with tab_ringkasan:
-    if search_button and query:
+    if (search_button or st.session_state.search_triggered) and query:
+        st.session_state.search_triggered = False
 
-        # Catatan: validasi & konfigurasi Gemini API key dilakukan di tahap
-        # AI Paraphraser (setelah ekstraksi 5W1H algoritmik selesai),
-        # karena AI di arsitektur baru ini HANYA dipakai untuk merangkai
-        # hasil ekstraksi jadi paragraf natural -- bukan untuk retrieval
-        # ataupun ekstraksi 5W1H itu sendiri.
-
-        # --- PROSES SEARCH (RETRIEVAL) ---
         with st.spinner("🔍 Mencari dokumen yang relevan (Hybrid Search)..."):
             start_time = time.time()
-            
-            # Preprocess query untuk BM25 (case folding + stopword + stemming)
-            # Note: Query untuk Semantic Search menggunakan teks ASLI (tanpa preprocessing)
             query_processed = preprocess_for_bm25(query)
-            
-            # 1. BM25 Search (menggunakan query yang sudah di-preprocess)
             bm25_results = search_bm25(query_processed, bm25_index, top_k=20)
-            
-            # 2. Semantic Search (menggunakan query ASLI tanpa preprocessing)
             semantic_results = search_semantic(query, semantic_model, corpus_embeddings, top_k=20)
-            
-            # 3. Hybrid Search (RRF)
             hybrid_results = reciprocal_rank_fusion(bm25_results, semantic_results, k=rrf_k, top_k=top_k)
-            
             retrieval_time = time.time() - start_time
             
         st.success(f"Ditemukan {len(hybrid_results)} artikel yang relevan dalam {retrieval_time:.2f} detik.")
         
-        # --- MENYIAPKAN DATA UNTUK EKSTRAKSI & UI ---
         retrieved_articles = []
         for doc_idx, rrf_score in hybrid_results:
             row = df.iloc[doc_idx]
@@ -401,7 +638,6 @@ with tab_ringkasan:
                 'score': rrf_score
             })
 
-        # --- KONFIGURASI AI (untuk parafrase) ---
         ai_ready = False
         if api_key_input:
             try:
@@ -410,28 +646,15 @@ with tab_ringkasan:
             except Exception as e:
                 st.error(f"Gagal mengkonfigurasi Gemini API: {e}")
 
-        # --- TAHAP 1: EKSTRAKSI 5W1H HYBRID (NER untuk WHO, rule-based multi untuk WHEN/WHERE, rule-based+QA fallback untuk WHY/HOW) ---
-        # ner_pipeline & qa_pipeline sudah di-load SEKALI di awal app (lihat
-        # get_hybrid_models() di bagian INISIALISASI) -- di sini TIDAK ada
-        # loading ulang, cuma dipakai (pipeline bisa None kalau gagal load).
-        status_msgs = []
-        if ner_pipeline is None:
-            status_msgs.append(f"NER (WHO): {ner_load_error or 'gagal dimuat'}")
-        if qa_pipeline is None:
-            status_msgs.append(f"QA (WHY/HOW fallback): {qa_load_error or 'gagal dimuat'}")
-        if status_msgs:
-            st.caption("⚠️ Model hybrid tidak aktif, pakai fallback rule-based/heuristik. Detail error: " + " | ".join(status_msgs))
-
-        with st.spinner("🔬 Mengekstrak 5W1H (hybrid: NER + rule-based + QA fallback)..."):
+        with st.spinner("🔬 Mengekstrak informasi terstruktur (5W1H)..."):
             start_extract_time = time.time()
             all_5w1h = []
             for art in retrieved_articles:
                 article_data = {'title': art['title'], 'date': art['date'], 'content': art['content']}
-                all_5w1h.append(extract_5w1h_hybrid(article_data, ner_pipeline=ner_pipeline, qa_pipeline=qa_pipeline))
+                all_5w1h.append(extract_5w1h(article_data))
             extract_time = time.time() - start_extract_time
-        st.caption(f"⚙️ Ekstraksi 5W1H (hybrid): {extract_time:.3f}s untuk {len(all_5w1h)} artikel")
+        st.caption(f"⚙️ Waktu ekstraksi: {extract_time:.3f}s untuk {len(all_5w1h)} artikel")
 
-        # --- TAHAP 2: AI PARAPHRASER (merangkai hasil ekstraksi jadi paragraf natural) ---
         all_paraphrases = []
         if ai_ready:
             with st.spinner("🤖 AI merangkai hasil ekstraksi menjadi paragraf natural..."):
@@ -442,18 +665,16 @@ with tab_ringkasan:
                 ai_time = time.time() - start_ai_time
             st.caption(f"🤖 AI Paraphrasing: {ai_time:.2f}s untuk {len(all_paraphrases)} artikel")
         else:
-            st.info("ℹ️ Gemini API Key belum dimasukkan — paragraf di kolom kanan ditampilkan dari penggabungan otomatis hasil ekstraksi (tanpa AI). Masukkan API Key di sidebar untuk paragraf yang lebih natural.")
+            st.info("ℹ️ Kunci API Gemini belum dimasukkan. Ringkasan ditampilkan dalam format standar. Masukkan Kunci API di sidebar untuk ringkasan yang lebih optimal dan natural.")
             for art, w5h1 in zip(retrieved_articles, all_5w1h):
                 all_paraphrases.append(_fallback_paragraph(w5h1, art['title']))
 
-        # --- MENAMPILKAN ARTIKEL: KIRI 5W1H TERSTRUKTUR | KANAN PARAGRAF NATURAL ---
         st.markdown(f"### 📑 Top {len(retrieved_articles)} Artikel Relevan")
 
         for i, art in enumerate(retrieved_articles):
             item = all_5w1h[i]
             paragraph = all_paraphrases[i] if i < len(all_paraphrases) else ""
 
-            # Header artikel (judul + meta)
             header_html = (
 f'<div class="article-section" style="margin-bottom:0.6rem;">'
 f'<div class="article-title">{art["title"]}</div>'
@@ -468,32 +689,24 @@ f'</div>'
             col_left, col_right = st.columns([1, 1])
 
             with col_left:
-                def _join(val):
-                    if isinstance(val, list):
-                        vals = [v for v in val if v and "Tidak disebutkan" not in v]
-                        return ", ".join(vals) if vals else "Tidak terdeteksi"
-                    return val if val else "Tidak terdeteksi"
-
-                why_src = item.get("why_source", "")
-                how_src = item.get("how_source", "")
-                why_tag = " <em style='opacity:0.6;font-size:0.7em;'>(via QA model)</em>" if why_src == "qa-model" else ""
-                how_tag = " <em style='opacity:0.6;font-size:0.7em;'>(via QA model)</em>" if how_src == "qa-model" else ""
+                def _fmt(val):
+                    return val if val and "Tidak disebutkan" not in val else "Tidak terdeteksi"
 
                 w5h1_html = (
 '<div class="w5h1-grid" style="grid-template-columns:1fr;">'
-'<span class="w5h1-label">🔍 5W+1H (Hybrid: NER + Rule-based + QA fallback)</span>'
+'<span class="w5h1-label">🔍 Informasi Terstruktur (5W+1H)</span>'
 '<div class="w5h1-item"><span class="w5h1-badge badge-what">WHAT</span>'
-f'<span class="w5h1-text">{item.get("what", "Tidak terdeteksi")}</span></div>'
+f'<span class="w5h1-text">{_fmt(item.get("what"))}</span></div>'
 '<div class="w5h1-item"><span class="w5h1-badge badge-who">WHO</span>'
-f'<span class="w5h1-text">{_join(item.get("who"))}</span></div>'
+f'<span class="w5h1-text">{_fmt(item.get("who"))}</span></div>'
 '<div class="w5h1-item"><span class="w5h1-badge badge-when">WHEN</span>'
-f'<span class="w5h1-text">{_join(item.get("when"))}</span></div>'
+f'<span class="w5h1-text">{_fmt(item.get("when"))}</span></div>'
 '<div class="w5h1-item"><span class="w5h1-badge badge-where">WHERE</span>'
-f'<span class="w5h1-text">{_join(item.get("where"))}</span></div>'
+f'<span class="w5h1-text">{_fmt(item.get("where"))}</span></div>'
 '<div class="w5h1-item"><span class="w5h1-badge badge-why">WHY</span>'
-f'<span class="w5h1-text">{item.get("why", "Tidak terdeteksi")}{why_tag}</span></div>'
+f'<span class="w5h1-text">{_fmt(item.get("why"))}</span></div>'
 '<div class="w5h1-item"><span class="w5h1-badge badge-how">HOW</span>'
-f'<span class="w5h1-text">{item.get("how", "Tidak terdeteksi")}{how_tag}</span></div>'
+f'<span class="w5h1-text">{_fmt(item.get("how"))}</span></div>'
 '</div>'
                 )
                 st.markdown(w5h1_html, unsafe_allow_html=True)
@@ -501,13 +714,12 @@ f'<span class="w5h1-text">{item.get("how", "Tidak terdeteksi")}{how_tag}</span><
             with col_right:
                 paraphrase_html = (
 '<div class="paraphrase-box">'
-'<span class="paraphrase-label">📝 Ringkasan Natural (AI Paraphrase)</span>'
+'<span class="paraphrase-label">📝 Ringkasan Artikel</span>'
 f'{paragraph}'
 '</div>'
                 )
                 st.markdown(paraphrase_html, unsafe_allow_html=True)
 
-            # Tombol "Baca Selengkapnya"
             with st.expander("📖 Baca Selengkapnya"):
                 st.write(art['content'])
 
@@ -516,14 +728,16 @@ f'{paragraph}'
     elif search_button and not query:
         st.warning("Silakan masukkan kata kunci pencarian terlebih dahulu.")
     else:
-        # Tampilan kosong saat belum search
         st.info("👈 Masukkan kata kunci pencarian dan klik 'Search' untuk melihat hasil.")
         
-        # Placeholder Illustration
-        st.markdown("""
+        st.markdown(f"""
         <div style="text-align: center; opacity: 0.5; padding: 4rem;">
             <div style="font-size: 5rem; margin-bottom: 1rem;">🔍</div>
-            <h3 style="font-family: 'Outfit', sans-serif;">Menunggu Kueri Pencarian</h3>
-            <p>Sistem siap mencari dan meringkas ratusan berita dalam hitungan detik.</p>
+            <h3 style="font-family: 'Outfit', sans-serif; color: {text_color} !important;">Menunggu Kueri Pencarian</h3>
+            <p style="color: {sub_color} !important;">Sistem siap mencari dan meringkas ratusan berita dalam hitungan detik.</p>
         </div>
         """, unsafe_allow_html=True)
+
+# Reset active tab to dataset when no search is active
+if not query:
+    st.session_state.active_tab = 0

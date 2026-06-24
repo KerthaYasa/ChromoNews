@@ -105,7 +105,7 @@ def _score_who_candidates(content, title=""):
     sentences = _split_sentences(content)
     candidates = {}  # nama -> skor
 
-    for sent_idx, sent in enumerate(sentences[:6]):  # fokus 6 kalimat pertama
+    for sent_idx, sent in enumerate(sentences[:8]):  # fokus 8 kalimat pertama
         # Cari kandidat, tapi lewati kata pertama kalimat (sering kapital krn posisi)
         for match in _CAP_PHRASE_PATTERN.finditer(sent):
             phrase = match.group(1).strip()
