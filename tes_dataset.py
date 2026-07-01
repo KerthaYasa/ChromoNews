@@ -1,32 +1,96 @@
 import pandas as pd
+from pathlib import Path
 
-# 1. Load data
-df = pd.read_csv("data/news.csv")
+# ======================================================
+# CLEAN DATASET UNTUK CHROMONEWS
+# ======================================================
 
-# 2. Filtering kolom yang relevan saja untuk ChromoNews
-selected_columns = ['id', 'date', 'title', 'content', 'summary']
-df_clean = df[selected_columns].copy()
+# Folder project (otomatis)
+BASE_DIR = Path(__file__).resolve().parent
 
-# 3. Handling Missing Values (Menghapus baris yang content atau date-nya kosong)
-# Penjelasan logis: Kita tidak bisa mencari (retrieve) berita yang tidak ada isinya, 
-# dan kita tidak bisa melakukan "Temporal Event Summarization" jika tanggalnya tidak ada.
-df_clean = df_clean.dropna(subset=['content', 'date'])
+# File input & output
+INPUT_FILE = BASE_DIR / "data" / "news.csv"
+OUTPUT_FILE = BASE_DIR / "cleaned_news_sample.csv"
 
-# 4. Mereset index setelah penghapusan baris agar urutan tetap rapi
-df_clean = df_clean.reset_index(drop=True)
+print("=" * 60)
+print("MEMBUAT DATASET CHROMONEWS")
+print("=" * 60)
 
-print("--- INFO DATASET SETELAH DIBERSIHKAN ---")
-print(df_clean.info())
+# ======================================================
+# 1. Load Dataset
+# ======================================================
 
-# 5. Opsional untuk eksperimen awal: Sampling Data
-# Menjalankan BM25 dan Semantic Search pada 32.000 data sekaligus di tahap uji coba 
-# bisa memakan waktu berjam-jam untuk proses embedding. 
-# Sebagai AI Engineer, best practice-nya adalah mengambil sampel dulu (misal 1000 data) 
-# untuk memastikan pipeline berjalan lancar, baru nanti di-scale up ke seluruh data.
+print("\n[1/5] Memuat dataset...")
 
-df_sample = df_clean.sample(n=1000, random_state=42).reset_index(drop=True)
-print(f"\nJumlah data yang akan dipakai untuk uji coba pipeline: {len(df_sample)} baris")
+df = pd.read_csv(INPUT_FILE)
 
-# Menyimpan data bersih agar tidak perlu cleaning berulang-ulang
-df_sample.to_csv('cleaned_news_sample.csv', index=False)
-print("File 'cleaned_news_sample.csv' berhasil disimpan!")
+print(f"Jumlah data awal : {len(df):,}")
+
+# ======================================================
+# 2. Ambil kolom yang dibutuhkan
+# ======================================================
+
+print("\n[2/5] Memilih kolom...")
+
+df = df[["Judul", "Waktu", "Content"]].copy()
+
+# ======================================================
+# 3. Cleaning
+# ======================================================
+
+print("\n[3/5] Cleaning data...")
+
+df = df.dropna(subset=["Judul", "Waktu", "Content"])
+df = df.reset_index(drop=True)
+
+print(f"Jumlah setelah cleaning : {len(df):,}")
+
+# ======================================================
+# 4. Format sesuai ChromoNews
+# ======================================================
+
+print("\n[4/5] Menyesuaikan format...")
+
+df.rename(columns={
+    "Judul": "title",
+    "Waktu": "date",
+    "Content": "content"
+}, inplace=True)
+
+# Tambahkan ID
+df.insert(0, "id", range(1, len(df) + 1))
+
+# Tambahkan summary kosong
+df["summary"] = ""
+
+# ======================================================
+# 5. Sampling 5000 berita
+# ======================================================
+
+print("\n[5/5] Sampling dataset...")
+
+SAMPLE_SIZE = min(5000, len(df))
+
+df_sample = (
+    df.sample(
+        n=SAMPLE_SIZE,
+        random_state=42
+    )
+    .reset_index(drop=True)
+)
+
+print(f"Jumlah sample : {len(df_sample):,}")
+
+# Simpan
+df_sample.to_csv(OUTPUT_FILE, index=False)
+
+# Cek hasil simpan
+cek = pd.read_csv(OUTPUT_FILE)
+print("Jumlah baris file yang disimpan:", len(cek))
+
+print("\n" + "=" * 60)
+print("SELESAI")
+print("=" * 60)
+
+print(f"File berhasil disimpan di:\n{OUTPUT_FILE}")
+print(f"Total berita: {len(df_sample):,}")

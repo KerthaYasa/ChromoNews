@@ -1,90 +1,55 @@
 """
-ner_model.py
-============
-Wrapper untuk model NER terlatih (cahya/bert-base-indonesian-NER) untuk
-deteksi MULTI-ENTITAS WHO (PER + ORG) secara native.
+ner_model.py - v4
+==================
+Upgrade dari cahya/bert-base-indonesian-NER (3 label: PER/ORG/LOC kasar)
+ke cahya/xlm-roberta-large-indonesian-NER (18 label fine-grained,
+termasuk GPE/FAC/LOC terpisah -- jauh lebih cocok untuk WHO & WHERE).
 
-REVISI (v3): loader dipisah dari inference, supaya pipeline bisa di-cache
-SEKALI di level Streamlit (`@st.cache_resource` di app.py) dan dipakai
-ulang ("di-inject") ke semua pemanggilan, BUKAN lazy-singleton tersembunyi
-di modul ini. Alasan migrasi dari pola lama (singleton manual):
-
-  1. PERFORMA: load_ner_pipeline() dipanggil SEKALI per sesi app (bukan
-     dicoba ulang diam-diam tiap kali dibutuhkan) -- run berikutnya pakai
-     resource yang sudah ada di cache Streamlit, tidak reload dari nol.
-  2. RETRY OTOMATIS YANG BENAR: kalau loading gagal (exception), Streamlit
-     `@st.cache_resource` TIDAK menyimpan exception ke cache -- jadi kalau
-     kamu baru saja install dependency yang kurang, rerun berikutnya akan
-     OTOMATIS mencoba lagi tanpa perlu restart total proses Streamlit
-     (beda dengan singleton manual versi sebelumnya yang mengunci status
-     gagal selama proses hidup).
-  3. TESTABLE: extract_who_multi() jadi fungsi murni (pure function) yang
-     terima pipeline sebagai parameter -- gampang di-unit-test tanpa perlu
-     mocking state global.
-
-Model dilatih di dataset id_nergrit_corpus, label yang relevan: PER
-(person), ORG (organisasi). WHERE & WHEN tetap rule-based (lihat
-hybrid_5w1h.py) sesuai keputusan desain: model hanya untuk WHO.
+Kalau resource terbatas, ganti MODEL_NAME ke versi base:
+    cahya/xlm-roberta-base-indonesian-NER
+(12 layer vs 24 layer di large, lebih cepat & ringan, akurasi sedikit turun)
 """
 
-TARGET_LABELS = {"PER", "ORG"}
+MODEL_NAME = "cahya/xlm-roberta-large-indonesian-NER"
+
+# Label yang relevan untuk WHO
+WHO_LABELS = {"PER"}
+
+# Label yang relevan untuk WHERE, diurutkan dari prioritas tertinggi
+# GPE = kota/provinsi/negara (paling reliable utk "lokasi" dalam arti umum)
+# FAC = gedung/kantor/jalan/bandara (lokasi spesifik kejadian)
+# LOC = kawasan/area non-administratif (gunung, sungai, dsb -- jarang dipakai
+#       di berita tapi tetap valid)
+WHERE_LABEL_PRIORITY = ["GPE", "FAC", "LOC"]
 
 
 def load_ner_pipeline():
     """
-    Loader MENTAH -- TIDAK membungkus exception (sengaja).
-    Dipanggil dari app.py lewat @st.cache_resource, supaya Streamlit yang
-    mengatur caching & retry behavior (lihat docstring modul di atas).
-
-    Returns:
-        transformers.Pipeline
-
-    Raises:
-        Exception apapun yang terjadi saat load (network error, dependency
-        belum lengkap/sentencepiece hilang, dst) -- caller (app.py)
-        WAJIB tangkap dengan try/except dan tampilkan pesannya ke user.
+    Loader mentah, tidak membungkus exception (sengaja, biarkan caller -
+    misal @st.cache_resource di app.py - yang menangani retry & pesan error).
     """
     from transformers import pipeline
     return pipeline(
         "ner",
-        model="cahya/bert-base-indonesian-NER",
+        model=MODEL_NAME,
         aggregation_strategy="simple",
     )
 
 
-def _is_valid_person_org_span(name, full_text, start, end):
+def _is_valid_span(name: str, full_text: str, start, end) -> bool:
     """
-    Validasi TAMBAHAN pasca-NER untuk menyaring span yang JELAS rusak.
-
-    KONTEKS BUG: aggregation_strategy="simple" kadang menghasilkan span
-    yang memotong DI TENGAH kata, khususnya di sekitar token yang asing
-    buat tokenizer WordPiece seperti handle media sosial ("@username").
-    Contoh nyata: dari teks "...akun Instagramnya @prasetyoedimarsudi..."
-    model bisa mengembalikan span "yoedimarsudi" -- potongan tengah dari
-    username, BUKAN nama valid. Guard `name.startswith("##")` yang sudah
-    ada TIDAK menangkap ini, karena aggregation_strategy sudah membuang
-    prefix "##" sebelum span dikembalikan -- yang rusak adalah BATAS
-    span-nya (start/end), bukan token mentahnya.
-
-    Heuristik deteksi:
-    1. Kalau karakter TEPAT SEBELUM span adalah huruf/angka (bukan spasi,
-       tanda baca, atau awal teks) -> span ini memotong di tengah sebuah
-       "kata" yang lebih panjang (mis. nama domain, username, atau kata
-       majemuk tanpa spasi) -> TOLAK.
-    2. Kalau ada karakter '@' dalam jarak pendek SEBELUM span (cek 15
-       karakter ke belakang) tanpa spasi pemisah -> ini pecahan dari
-       handle media sosial, bukan nama orang/organisasi -> TOLAK.
+    Validasi span pasca-NER untuk menyaring potongan kata yang rusak
+    (mis. pecahan handle @username, atau span yang motong di tengah kata).
+    Logic dipertahankan dari versi lama -- ini sudah bagus.
     """
     if start is None or end is None:
-        return True  # tidak ada info posisi, tidak bisa divalidasi -- lolos saja
+        return True
 
-    # Cek 1: karakter sebelum span adalah huruf/angka -> span memotong kata
     if start > 0:
         char_before = full_text[start - 1]
         if char_before.isalnum():
             return False
 
-    # Cek 2: ada '@' tanpa spasi pemisah dalam jarak pendek ke belakang
     lookback_start = max(0, start - 20)
     segment_before = full_text[lookback_start:start]
     if "@" in segment_before and " " not in segment_before.split("@")[-1]:
@@ -93,69 +58,140 @@ def _is_valid_person_org_span(name, full_text, start, end):
     return True
 
 
-def extract_who_multi(pipe, content, title="", max_entities=3):
+def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 150):
     """
-    Mengekstrak hingga `max_entities` nama orang/organisasi unik dari teks.
+    Pecah teks panjang jadi beberapa window dengan overlap, supaya:
+    1. Tidak melanggar limit token model (XLM-R: 512 token, ~1500-2000 char
+       Bahasa Indonesia tergantung kepadatan subword).
+    2. Entitas yang ada di PARUH KEDUA/AKHIR artikel tetap kebagian dilihat
+       model -- ini akar masalah utama versi lama (cuma lihat 1500 char
+       pertama, padahal 76% artikel di dataset >1500 char).
+    3. Overlap mencegah entity di batas potongan ke-cut jadi 2 fragmen rusak.
 
-    Args:
-        pipe: hasil load_ner_pipeline() yang sudah di-cache (BUKAN None --
-              kalau model tidak tersedia, caller (hybrid_5w1h.py) yang
-              menentukan untuk tidak memanggil fungsi ini sama sekali dan
-              langsung pakai fallback heuristik)
-
-    Returns:
-        List[str] kandidat WHO, atau None kalau tidak ada entitas terdeteksi.
+    Returns: List[(chunk_text, global_offset)]
     """
-    if pipe is None:
-        return None
+    if not text:
+        return []
 
-    text_for_ner = content[:1500] if content else ""
-    if not text_for_ner.strip():
-        return None
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+        chunks.append((text[start:end], start))
+        if end == n:
+            break
+        start = end - overlap
+    return chunks
 
-    try:
-        entities = pipe(text_for_ner)
-    except Exception:
-        return None
 
-    candidates = []
-    seen_lower = set()
-    for ent in entities:
-        label = ent.get("entity_group", "")
-        if label not in TARGET_LABELS:
+def _merge_adjacent_entities(entities: list, original_text: str) -> list:
+    """
+    PERBAIKAN BUG: aggregation_strategy="simple" kadang gagal menyatukan
+    span yang seharusnya 1 entity utuh, akibat tokenizer SentencePiece
+    memecah kata di tengah subword. Contoh nyata yang ditemukan saat testing:
+
+        "Istana Negara" -> [LOC "Is" (54-56), LOC "tana Negara" (56-67)]
+
+    Padahal end span pertama PERSIS sama dengan start span kedua (56==56),
+    artinya tidak ada spasi/separator di antara keduanya di teks asli --
+    ini tanda kuat keduanya adalah SATU entity yang terpecah, bukan dua
+    entity berbeda yang kebetulan bersebelahan.
+
+    Strategi: kalau entity[i].end == entity[i+1].start (bersambungan TANPA
+    gap), dan tidak ada spasi di antara mereka di teks asli, gabungkan jadi
+    1 entity. Label diambil dari yang confidence-nya lebih tinggi, score
+    di-rata-rata.
+
+    PENTING: fungsi ini harus dipanggil SEBELUM _is_valid_span, supaya
+    span yang sudah digabung tidak keburu ditolak oleh validator (yang
+    justru didesain menolak span pecahan).
+    """
+    if not entities:
+        return entities
+
+    entities_sorted = sorted(
+        [e for e in entities if e["start"] is not None],
+        key=lambda e: e["start"]
+    )
+
+    merged = []
+    i = 0
+    while i < len(entities_sorted):
+        current = dict(entities_sorted[i])
+        j = i + 1
+        while j < len(entities_sorted):
+            nxt = entities_sorted[j]
+            # Bersambungan persis tanpa gap (tidak ada spasi/separator di antaranya)
+            if nxt["start"] == current["end"]:
+                current["text"] = current["text"] + nxt["text"]
+                current["end"] = nxt["end"]
+                # pakai score yang lebih tinggi sebagai representasi confidence gabungan
+                current["score"] = max(current["score"], nxt["score"])
+                # kalau label beda, pertahankan label dari fragmen confidence tertinggi
+                if nxt["score"] > entities_sorted[i]["score"]:
+                    current["label"] = nxt["label"]
+                j += 1
+            else:
+                break
+        merged.append(current)
+        i = j
+
+    return merged
+
+
+def run_ner_chunked(pipe, content: str, chunk_size: int = 1500, overlap: int = 150):
+    """
+    Jalankan NER ke SELURUH teks (bukan cuma 1500 char pertama) lewat chunking,
+    lalu kembalikan list entity ter-normalisasi dengan offset GLOBAL
+    (relatif ke `content` penuh, bukan relatif ke chunk).
+
+    Returns: List[dict] dengan keys: text, label, start, end, score
+    """
+    if pipe is None or not content:
+        return []
+
+    all_entities = []
+    for chunk, offset in chunk_text(content, chunk_size, overlap):
+        try:
+            results = pipe(chunk)
+        except Exception:
             continue
 
-        start, end = ent.get("start"), ent.get("end")
-        if start is not None and end is not None:
-            name = text_for_ner[start:end].strip()
-        else:
-            name = ent.get("word", "").strip()
+        chunk_entities = []
+        for ent in results:
+            label = ent.get("entity_group", "")
+            start, end = ent.get("start"), ent.get("end")
 
-        if len(name) < 3 or name.startswith("##"):
-            continue
+            if start is not None and end is not None:
+                name = chunk[start:end].strip()
+                global_start = offset + start
+                global_end = offset + end
+            else:
+                name = ent.get("word", "").strip()
+                global_start = global_end = None
 
-        # Saring span yang jelas rusak (lihat docstring _is_valid_person_org_span)
-        if not _is_valid_person_org_span(name, text_for_ner, start, end):
-            continue
+            if not name or name.startswith("##"):
+                continue
 
-        # Saring nama 1 kata yang TERLALU pendek untuk nama orang utuh
-        # (mis. "Ali" tanpa nama belakang menyusul) -- nama orang Indonesia
-        # di berita hampir selalu disebut minimal 2 kata saat pertama kali
-        # diperkenalkan. Single-word PER dengan panjang <8 karakter SANGAT
-        # mungkin entity merging gagal menyatukan dengan kata berikutnya,
-        # bukan benar-benar nama 1 kata (beda dgn ORG yg wajar 1 kata, mis "KPK").
-        if label == "PER" and " " not in name and len(name) < 8:
-            continue
+            chunk_entities.append({
+                "text": name,
+                "label": label,
+                "start": global_start,
+                "end": global_end,
+                "score": float(ent.get("score", 0.0)),
+            })
 
-        key = name.lower()
-        if key in seen_lower:
-            continue
-        if any(key in s or s in key for s in seen_lower):
-            continue
-        seen_lower.add(key)
-        candidates.append(name)
+        # Gabungkan dulu fragmen yang bersambungan SEBELUM validasi span
+        chunk_entities = _merge_adjacent_entities(chunk_entities, chunk)
 
-    if not candidates:
-        return None
+        for e in chunk_entities:
+            if len(e["text"]) < 2:
+                continue
+            local_start = e["start"] - offset if e["start"] is not None else None
+            local_end = e["end"] - offset if e["end"] is not None else None
+            if not _is_valid_span(e["text"], chunk, local_start, local_end):
+                continue
+            all_entities.append(e)
 
-    return candidates[:max_entities]
+    return all_entities

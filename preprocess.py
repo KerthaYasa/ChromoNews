@@ -1,94 +1,168 @@
-import pandas as pd
-import re
-from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
-from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
+# preprocess.py
+# ======================================================
+# PREPROCESS DATASET UNTUK BM25 & SEMANTIC SEARCH
+# ======================================================
 
-# Inisialisasi Sastrawi (Stemmer & Stopwords) — hanya untuk pipeline BM25
-print("Menyiapkan Sastrawi (Ini butuh beberapa detik)...")
+import re
+import time
+from pathlib import Path
+
+import pandas as pd
+from tqdm import tqdm
+
+from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
+from Sastrawi.StopWordRemover.StopWordRemoverFactory import (
+    StopWordRemoverFactory,
+)
+
+print("Menyiapkan Sastrawi...")
+
 stemmer = StemmerFactory().create_stemmer()
 stopword = StopWordRemoverFactory().create_stop_word_remover()
 
+# Aktifkan progress bar untuk pandas
+tqdm.pandas()
 
-# =============================================================================
-# PIPELINE 1: Preprocessing untuk BM25 (Lexical Search)
-# - Case folding, cleaning, stopword removal, stemming DILAKUKAN
-# - Karena BM25 menggunakan pendekatan statistik (TF-IDF), 
-#   preprocessing ini diperlukan untuk normalisasi term matching
-# =============================================================================
+
+# ======================================================
+# BM25 PREPROCESSING
+# ======================================================
 def preprocess_for_bm25(text):
     """
-    Preprocessing untuk pipeline BM25 (lexical search).
-    
-    Tahapan:
-    - Case folding (huruf kecil)
-    - Cleaning (hapus karakter selain huruf, angka, dan spasi)
-    - Stopword removal (Sastrawi)
-    - Stemming (Sastrawi)
-    
-    Note: Angka TETAP dipertahankan karena penting untuk konteks berita
-    (tahun, jumlah korban, statistik, pasal hukum, dll.)
+    Preprocessing untuk BM25:
+    - lowercase
+    - hapus karakter selain huruf/angka
+    - stopword removal
+    - stemming
     """
-    text = str(text).lower()                    # Case folding
-    text = re.sub(r'[^a-z0-9\s]', '', text)     # Cleaning (pertahankan angka)
-    text = stopword.remove(text)                 # Stopword removal
-    text = stemmer.stem(text)                    # Stemming
+
+    text = str(text).lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = stopword.remove(text)
+    text = stemmer.stem(text)
+
     return text
 
 
-# =============================================================================
-# PIPELINE 2: Preprocessing untuk Semantic Search (Sentence Transformer)
-# - Teks HARUS TETAP UTUH / ASLI
-# - Case folding, stopword removal, stemming TIDAK DILAKUKAN
-# - Alasan:
-#   1. Sentence Transformer (BERT-based) sudah dilatih pada teks natural
-#   2. Huruf besar/kecil penting untuk NER (nama orang, tempat, organisasi)
-#   3. Stopword memberi konteks semantik ("makan nasi" != "nasi")
-#   4. Stemming merusak tokenisasi subword BERT
-#   5. Angka penting untuk informasi 5W1H (When, How)
-# =============================================================================
+# ======================================================
+# SEMANTIC PREPROCESSING
+# ======================================================
 def preprocess_for_semantic(text):
     """
-    Preprocessing minimal untuk pipeline Semantic Search.
-    
-    Hanya melakukan:
-    - Konversi ke string
-    - Normalisasi whitespace (hapus spasi/newline berlebih)
-    - Strip leading/trailing whitespace
-    
-    Teks asli TIDAK BOLEH diubah strukturnya karena Sentence Transformer
-    memerlukan kalimat utuh untuk tokenisasi yang benar.
+    Semantic Search:
+    hanya normalize whitespace
     """
+
     text = str(text).strip()
-    text = re.sub(r'\s+', ' ', text)             # Normalize whitespace saja
+    text = re.sub(r"\s+", " ", text)
+
     return text
 
 
-# --- BACKWARD COMPATIBILITY ---
-# Alias untuk fungsi lama agar tidak break import yang sudah ada
-preprocess_text = preprocess_for_bm25
-
-
-# --- Script untuk re-generate preprocessed dataset ---
+# ======================================================
+# MAIN
+# ======================================================
 if __name__ == "__main__":
-    # 1. Load sample data
-    print("Memuat dataset sampel...")
-    df = pd.read_csv('cleaned_news_sample.csv')
 
-    # 2. Preprocessing untuk BM25 (kolom processed_content)
-    print(f"Memulai proses Preprocessing BM25 pada {len(df)} data berita...")
-    print("Silakan tunggu, jangan dimatikan. Sedang memproses...")
-    df['processed_content'] = df['content'].apply(preprocess_for_bm25)
+    BASE_DIR = Path(__file__).resolve().parent
 
-    # 3. Kolom 'content' ASLI tetap dipertahankan untuk Semantic Search
-    # (Semantic search langsung menggunakan kolom 'content' tanpa modifikasi)
+    INPUT_FILE = BASE_DIR / "cleaned_news_sample.csv"
+    OUTPUT_FILE = BASE_DIR / "preprocessed_news_sample.csv"
 
-    # 4. Simpan hasil
-    df.to_csv('preprocessed_news_sample.csv', index=False)
-    print(f"\nSelesai! Data berhasil disimpan sebagai 'preprocessed_news_sample.csv'")
+    print("=" * 70)
+    print("MEMPROSES DATASET (BM25 + SEMANTIC SEARCH)")
+    print("=" * 70)
 
-    # Tampilkan perbandingan
-    print("\n--- PERBANDINGAN HASIL ---")
-    print("ASLI (untuk Semantic Search):")
-    print(df['content'].iloc[0][:150] + "...")
-    print("\nPREPROCESSED BM25:")
-    print(df['processed_content'].iloc[0][:150] + "...")
+    # --------------------------------------------------
+    # LOAD DATA
+    # --------------------------------------------------
+
+    print("\n[1/3] Memuat dataset...")
+
+    print("Lokasi dataset:")
+    print(INPUT_FILE)
+
+    if not INPUT_FILE.exists():
+        raise FileNotFoundError(f"Dataset tidak ditemukan:\n{INPUT_FILE}")
+
+    df = pd.read_csv(INPUT_FILE)
+
+    print(f"✓ {len(df):,} artikel dimuat")
+
+    # --------------------------------------------------
+    # BM25
+    # --------------------------------------------------
+
+    print("\n[2/3] Preprocessing BM25")
+    print("Lowercase → Cleaning → Stopword Removal → Stemming")
+
+    start = time.time()
+
+    df["processed_content"] = df["content"].progress_apply(
+        preprocess_for_bm25
+    )
+
+    end = time.time()
+
+    print(f"✓ BM25 selesai ({end-start:.2f} detik)")
+
+    # --------------------------------------------------
+    # SEMANTIC
+    # --------------------------------------------------
+
+    print("\n[3/3] Preprocessing Semantic Search")
+    print("Normalize whitespace")
+
+    start = time.time()
+
+    df["content_semantic"] = df["content"].progress_apply(
+        preprocess_for_semantic
+    )
+
+    end = time.time()
+
+    print(f"✓ Semantic selesai ({end-start:.2f} detik)")
+
+    # --------------------------------------------------
+    # SAVE
+    # --------------------------------------------------
+
+    print("\nMenyimpan dataset...")
+
+    df.to_csv(OUTPUT_FILE, index=False)
+
+    print(f"✓ Dataset disimpan:\n{OUTPUT_FILE}")
+
+    # --------------------------------------------------
+    # PREVIEW
+    # --------------------------------------------------
+
+    print("\n" + "=" * 70)
+    print("PREVIEW HASIL")
+    print("=" * 70)
+
+    print("\nContent Asli")
+    print("-" * 70)
+    print(df["content"].iloc[0][:200])
+
+    print("\nContent Semantic")
+    print("-" * 70)
+    print(df["content_semantic"].iloc[0][:200])
+
+    print("\nContent BM25")
+    print("-" * 70)
+    print(df["processed_content"].iloc[0][:200])
+
+    print("\n" + "=" * 70)
+    print("SELESAI")
+    print("=" * 70)
+
+    print(f"Jumlah artikel        : {len(df):,}")
+    print(f"Output               : {OUTPUT_FILE}")
+
+    print("\nKolom dataset:")
+    for col in df.columns:
+        print(f" - {col}")
+
+    print("\nSelanjutnya jalankan:")
+    print("python run_eval.py")

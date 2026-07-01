@@ -8,44 +8,21 @@ streamlit>=1.30.0
 Sastrawi>=1.0.1
 python-dotenv>=1.0.0
 
-# --- Untuk fitur HYBRID 5W1H (NER model WHO + QA model fallback WHY/HOW) ---
+# --- Untuk fitur NER model (WHO/WHERE extraction) ---
 # Opsional secara fungsional: kalau gagal install/load, app otomatis
-# fallback ke rule-based murni (lihat extraction/ner_model.py & qa_model.py)
-#
-# RIWAYAT KEPUTUSAN VERSI (penting, jangan pin ulang ke <5.0.0):
-# Awalnya dicoba menahan transformers di v4.x karena v5.0+ menghapus
-# total pipeline task "question-answering" yang dulu dipakai qa_model.py.
-# TAPI itu TIDAK BISA dipertahankan: sentence-transformers (dipakai di
-# semantic_search.py) sejak v5.2.1 sudah MELEPAS upper bound
-# "transformers<5.0.0" dari dependency-nya sendiri (lihat changelog resmi
-# huggingface/sentence-transformers rilis v5.2.1, "Joint Transformers v4
-# and v5 compatibility"). Begitu sentence-transformers terbaru ter-install,
-# pip akan SELALU menarik transformers v5 lagi, apapun pin kita di sini --
-# karena bukan transformers yang membatasi, sentence-transformers-nya yang
-# sudah tidak melarang.
-#
-# KEPUTUSAN FINAL: terima transformers v5. qa_model.py SUDAH DITULIS ULANG
-# untuk tidak memakai pipeline(task="question-answering") sama sekali --
-# load model+tokenizer manual via AutoModelForQuestionAnswering, forward
-# pass & span decoding manual. Ini valid di v4 maupun v5. ner_model.py
-# TIDAK perlu diubah -- task "ner" (dipakai di sana) TIDAK dihapus di v5,
-# sudah diverifikasi langsung lewat PIPELINE_REGISTRY.get_supported_tasks().
+# fallback ke rule-based murni (lihat extraction/ner_model.py)
 transformers>=4.41.0
-#
-# CATATAN PENTING soal torch (TETAP BERLAKU, independen dari isu di atas):
-# transformers menolak me-load checkpoint format lama (pytorch_model.bin /
-# pickle, BUKAN .safetensors) kalau torch < 2.6 -- proteksi keamanan utk
-# CVE-2025-32434 (lihat nvd.nist.gov). cahya/bert-base-indonesian-NER
-# (model NER project ini) HANYA punya pytorch_model.bin, TIDAK ada versi
-# .safetensors di repo HuggingFace-nya -- jadi WAJIB torch>=2.6.0, tidak
-# ada cara lain menghindari proteksi ini selain upgrade torch.
+
+# WAJIB untuk model cahya/xlm-roberta-large-indonesian-NER -- tokenizer
+# XLM-RoBERTa pakai SentencePiece, BEDA dari WordPiece-nya BERT lama.
+# Tanpa ini, load_ner_pipeline() akan gagal dengan error import sentencepiece.
+sentencepiece>=0.1.99
+
+# CATATAN soal torch:
+# transformers menolak load checkpoint format lama (pytorch_model.bin)
+# kalau torch < 2.6 (proteksi CVE-2025-32434). Model NER baru pakai format
+# safetensors jadi aman, tapi tetap disarankan torch>=2.6.0 untuk kompatibilitas.
 torch>=2.6.0
-#
-# CATATAN -- kalau punya GPU NVIDIA (cek dengan `nvidia-smi`):
-# baris di atas saja akan menarik build CPU-only dari PyPI biasa. Untuk
-# GPU acceleration, install torch TERPISAH lewat index resmi PyTorch,
-# contoh untuk CUDA 12.4 (kompatibel dengan driver NVIDIA >=525):
+
+# Untuk GPU NVIDIA (opsional, lebih cepat):
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
-# Tanpa ini, model NER/QA tetap jalan tapi pakai CPU (lebih lambat,
-# bukan error -- transformers otomatis fallback ke CPU kalau CUDA build
-# tidak terpasang).

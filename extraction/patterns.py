@@ -1,23 +1,9 @@
 """
 patterns.py
 ============
-Kumpulan pattern (regex) dan kamus kata kunci yang dipakai oleh
-`rule_based_5w1h.py` untuk mengekstrak elemen 5W1H secara ALGORITMIK
-(tanpa AI/LLM).
-
-Kenapa pendekatan rule-based?
------------------------------
-1. Transparan & bisa dijelaskan langkah demi langkah (cocok untuk laporan STKI,
-   beda dengan AI generatif yang prosesnya black-box).
-2. Deterministik -> hasil bisa diuji presisi/recall-nya terhadap ground truth.
-3. Murah & cepat -> tidak butuh panggilan API per artikel untuk EKSTRAKSI
-   (API hanya dipakai belakangan, sekali, untuk merangkai hasil ekstraksi
-   jadi kalimat natural di `paraphraser.py`).
-4. Berita Bahasa Indonesia (terutama media online) punya struktur penulisan
-   yang relatif konsisten (piramida terbalik, dateline, pola atribusi kutipan),
-   sehingga pattern matching sederhana sudah cukup efektif menangkap elemen
-   5W1H tanpa perlu model NLP berat (NER/POS tagger) yang butuh instalasi
-   model besar & lebih sulit dijelaskan ke pembaca awam.
+Kumpulan pattern (regex) dan kamus kata kunci untuk ekstraksi 5W1H.
+REVISI v5: Perbaikan DATE_PATTERNS (hapus relatif), WHERE filter organisasi,
+           WHO gelar diperluas, WHY konektor diperkuat.
 """
 
 import re
@@ -31,13 +17,13 @@ BULAN_INDO = [
 ]
 _BULAN_REGEX = "|".join(BULAN_INDO)
 
-# "13 Maret 2023" / "13-14 Maret 2023" / "1314 Maret 2023" (typo umum di scraping)
+# "13 Maret 2023" / "13-14 Maret 2023"
 DATE_PATTERN_FULL = re.compile(
     rf"\b\d{{1,2}}(?:[\s\-–]*\d{{1,2}})?\s+(?:{_BULAN_REGEX})\s+\d{{4}}\b",
     re.IGNORECASE,
 )
 
-# "Senin, 13 Maret 2023" / "Senin (13/4)" / "Senin (13/4/2023)"
+# "Senin, 13 Maret 2023" / "Senin (13/4/2023)"
 DAY_NAMES = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 _DAY_REGEX = "|".join(DAY_NAMES)
 DATE_PATTERN_WITH_DAY = re.compile(
@@ -45,23 +31,32 @@ DATE_PATTERN_WITH_DAY = re.compile(
     re.IGNORECASE,
 )
 
-# dd/mm/yyyy atau dd-mm-yyyy
-DATE_PATTERN_NUMERIC = re.compile(r"\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b")
+# dd/mm/yyyy atau dd-mm-yyyy (hanya jika 4 digit tahun, agar tidak ambil angka lain)
+DATE_PATTERN_NUMERIC = re.compile(r"\b\d{1,2}[/\-]\d{1,2}[/\-]\d{4}\b")
 
-DATE_PATTERN_SHORTHAND = re.compile(r"\b(?:Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)?\s*\(\d{1,2}/\d{1,2}(?:/\d{2,4})?\)", re.IGNORECASE)
-DATE_PATTERN_RELATIVE = re.compile(r"(?i)\b(?:hari ini|kemarin|besok)\b")
+DATE_PATTERN_SHORTHAND = re.compile(
+    r"\b(?:Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)?\s*\(\d{1,2}/\d{1,2}(?:/\d{2,4})?\)",
+    re.IGNORECASE,
+)
+
+# CATATAN: DATE_PATTERN_RELATIVE DIHAPUS — "hari ini", "kemarin", "besok"
+# tidak akan dimasukkan ke hasil WHEN karena tidak informatif (tidak absolut).
+# Akan digantikan oleh metadata_date jika tersedia.
+DATE_PATTERN_RELATIVE = re.compile(
+    r"(?i)\b(?:hari ini|kemarin|besok|tadi malam|malam tadi|sore tadi|pagi tadi)\b"
+)
 
 DATE_PATTERNS = [
-    DATE_PATTERN_WITH_DAY, 
-    DATE_PATTERN_FULL, 
-    DATE_PATTERN_NUMERIC, 
-    DATE_PATTERN_SHORTHAND, 
-    DATE_PATTERN_RELATIVE
+    DATE_PATTERN_WITH_DAY,
+    DATE_PATTERN_FULL,
+    DATE_PATTERN_NUMERIC,
+    DATE_PATTERN_SHORTHAND,
+    # DATE_PATTERN_RELATIVE SENGAJA TIDAK DIMASUKKAN
 ]
 
 
 # =============================================================================
-# 2. KATA PENGHUBUNG KAUSAL (untuk WHY) — "apa SEBAB-nya"
+# 2. KATA PENGHUBUNG KAUSAL (untuk WHY)
 # =============================================================================
 CAUSAL_CONNECTORS = [
     "atas dasar itulah", "atas dasar itu", "atas dasar",
@@ -71,21 +66,15 @@ CAUSAL_CONNECTORS = [
     "karena", "lantaran", "sebab", "imbas dari", "imbas",
     "dipicu oleh", "dipicu",
     "buntut dari", "buntut",
+    "diduga karena", "dikarenakan",
 ]
 INTER_SENTENCE_CAUSAL = [
-    "pasalnya", "oleh karena itu", "sebab itu", "karenanya", "alhasil"
+    "pasalnya", "oleh karena itu", "sebab itu", "karenanya", "alhasil",
+    "hal itu disebabkan", "hal tersebut disebabkan",
 ]
 
 # =============================================================================
-# 2b. KATA PENGHUBUNG TUJUAN/MOTIVASI (untuk WHY) — beda dari kausal di atas:
-#     kausal = "apa SEBAB sebuah peristiwa terjadi" (ke belakang/retrospektif)
-#     purposive = "apa TUJUAN/HARAPAN dari sebuah tindakan" (ke depan/prospektif)
-#     Banyak berita non-kriminal (kunjungan, pernyataan, klarifikasi) menulis
-#     motivasi dengan penanda tujuan, bukan penanda sebab-akibat — kalau
-#     hanya CAUSAL_CONNECTORS yang dicek, kasus seperti ini akan lolos
-#     tak terdeteksi (recall rendah). Ditangani terpisah dari "untuk" yang
-#     terlalu generik (lihat extract_why: "untuk" dicari TERBATAS di
-#     1-2 kalimat awal, dekat kata kerja utama, agar tidak overmatch).
+# 2b. KATA PENGHUBUNG TUJUAN/MOTIVASI (untuk WHY)
 # =============================================================================
 PURPOSE_CONNECTORS = [
     "dengan tujuan", "bertujuan untuk", "bertujuan",
@@ -94,41 +83,34 @@ PURPOSE_CONNECTORS = [
 ]
 
 # =============================================================================
-# 3. KATA PENGHUBUNG CARA/MODUS (untuk HOW) — "BAGAIMANA caranya"
+# 3. KATA PENGHUBUNG CARA/MODUS (untuk HOW)
 # =============================================================================
 METHOD_CONNECTORS = [
     "dengan cara", "dengan modus", "modus operandi", "modusnya",
     "melalui", "lewat", "menggunakan", "dengan menggunakan",
     "dengan memanfaatkan", "memanfaatkan",
     "secara langsung", "langsung mendatangi", "dengan mendatangi",
-    "dalam akun", "melalui akun", "via akun", "lewat akun",
     "berawal dari", "bermula dari", "diawali dari", "diawali",
 ]
 
-METHOD_VERB_PATTERN = re.compile(r"\bdengan\s+(?:meng|mem|men|meny|me|di|ber|ter|pe)[a-z]+\b", re.IGNORECASE)
+METHOD_VERB_PATTERN = re.compile(
+    r"\bdengan\s+(?:meng|mem|men|meny|me|di|ber|ter|pe)[a-z]+\b", re.IGNORECASE
+)
 
-# Kata penghubung generik penanda proses/urutan kejadian ("usai", "setelah").
-# DIPISAH dari METHOD_CONNECTORS karena terlalu umum/sering muncul di teks
-# berita apa pun -- kalau dicari di SELURUH artikel akan banyak salah
-# tangkap (overmatch). Maka HANYA dipakai sebagai fallback TERAKHIR dan
-# DIBATASI pada 3 kalimat awal saja (lihat extract_how()).
 HOW_FALLBACK_CONNECTORS = ["usai", "setelah"]
 
 # =============================================================================
-# 4. KATA KERJA PELAPORAN (reporting verbs) — penanda kalimat kutipan,
-#    dipakai untuk membantu deteksi WHO (nama yang dikutip biasanya pelaku
-#    utama/narasumber kunci dalam berita)
+# 4. KATA KERJA PELAPORAN (reporting verbs)
 # =============================================================================
 REPORTING_VERBS = [
     "kata", "ujar", "ungkap", "jelas", "tutur", "tegas", "papar",
     "terang", "imbuh", "tambah", "lanjut", "kata dia", "menurut",
     "tuturnya", "katanya", "ujarnya", "jelasnya", "tegasnya",
+    "menyebut", "mengatakan", "menyatakan", "menuturkan",
 ]
 
 # =============================================================================
-# 5. GELAR / JABATAN — penanda kuat bahwa frasa di sekitarnya adalah nama
-#    orang/lembaga (membantu WHO), sekaligus dipakai memfilter agar tidak
-#    salah tangkap kata kapital biasa (mis. awal kalimat)
+# 5. GELAR / JABATAN
 # =============================================================================
 TITLE_PREFIXES = [
     "Presiden", "Wakil Presiden", "Menteri", "Wakil Menteri", "Mendag",
@@ -138,10 +120,12 @@ TITLE_PREFIXES = [
     "Wakil Ketua", "Anggota DPR", "Anggota DPRD", "Jaksa", "Hakim",
     "Polisi", "Kapolri", "Kapolda", "Kapolres", "Brigjen", "Irjen",
     "Kombes", "AKP", "Mayor", "Kolonel", "Jenderal", "Letnan",
-    "Dokter", "Profesor", "Prof", "Dr",
+    "Dokter", "Profesor", "Prof", "Dr", "Sekretaris", "Deputi",
+    "Mantan", "Eks", "Tersangka", "Terdakwa", "Saksi",
+    "Kabid", "Kasatgas", "Kasatreskrim", "Pimpinan",
 ]
 
-# Lembaga/instansi umum (sering jadi subjek WHO juga, bukan cuma orang)
+# Lembaga/instansi dikenal
 KNOWN_ORGS = [
     "KPK", "Polri", "TNI", "DPR", "MPR", "MK", "MA", "BPK", "BPOM",
     "KPU", "Bawaslu", "OJK", "BI", "Bank Indonesia", "Kemenkeu",
@@ -150,25 +134,56 @@ KNOWN_ORGS = [
     "Pemkot", "Pemkab", "BNPB", "BMKG", "BPBD",
 ]
 
+# Kata/pola yang PASTI bukan lokasi geografis (untuk filter WHERE)
+NOT_LOCATION_PATTERNS = [
+    # Perusahaan / institusi (awalan umum)
+    r"\bPT\b", r"\bCV\b", r"\bTbk\b", r"\bPersero\b",
+    r"\bKPK\b", r"\bBUMN\b", r"\bDPR\b", r"\bMPR\b",
+    r"\bKemenkeu\b", r"\bKementerian\b", r"\bKejaksaan\b",
+    r"\bBareskrim\b", r"\bMahkamah\b", r"\bPengadilan\b",
+    r"\bBank\s+\w+", r"\bUniversitas\b", r"\bInstitut\b",
+    r"\bSekolah\b", r"\bRumah\s+Sakit\b",
+    # Nama-nama media
+    r"\bTempo\b", r"\bKompas\b", r"\bDetik\b",
+    # Kata-kata yang sering muncul dalam nama organisasi tapi bukan lokasi
+    r"\bBursa\b", r"\bInformasi\b", r"\bKeterbukaan\b",
+]
+
 # =============================================================================
-# 6. POLA DATELINE — prefix khas media online di awal artikel, mis:
-#    "TEMPO.CO, Jakarta -" / "Suara.com -" / "INFO NASIONAL -"
-#    Berguna untuk: (a) membersihkan kalimat lead sebelum dipakai sbg WHAT,
-#                   (b) lokasi setelah koma sering kali adalah WHERE.
+# 6. POLA DATELINE
 # =============================================================================
 DATELINE_PATTERN = re.compile(
-    r"^([A-Za-z\.\s]{2,25})\s*,\s*([A-Za-z\.\s]{2,25})\s*[-–]\s*"
+    r"^([A-Za-z\.]{2,25})\s*,\s*([A-Za-z\.\s]{2,25})\s*[-–]\s*"
 )
 DATELINE_SIMPLE_PATTERN = re.compile(r"^([A-Z][\w\.\s]{2,25})\s*[-–]\s*")
 
 # =============================================================================
-# 7. ARTEFAK NAVIGASI/UI SCRAPING — label seperti "Baca Juga", "Gambas:Video"
-#    sering ikut ter-scrape dari halaman berita, dan karena ditulis kapital
-#    sering salah tertangkap heuristik kapitalisasi sebagai "entitas" WHO.
-#    Daftar ini dipakai untuk MEMBUANG kandidat semacam itu dari hasil WHO.
+# 7. ARTEFAK NAVIGASI/UI SCRAPING
 # =============================================================================
 SCRAPING_ARTIFACTS = [
     "baca juga", "gambas video", "gambas:video",
     "scroll untuk melanjutkan", "scroll untuk lanjutkan",
     "advertisement", "lihat juga", "simak juga",
+    "pilihan editor", "ikuti berita", "trending",
+    "klik di sini", "klikdi sini",
 ]
+
+# =============================================================================
+# 8. BLACKLIST TAMBAHAN untuk WHERE (non-lokasi geografis)
+# =============================================================================
+WHERE_EXACT_BLACKLIST = {
+    # Institusi hukum dan pemerintah
+    "komisi pemberantasan korupsi", "mahkamah agung", "mahkamah konstitusi",
+    "pengadilan negeri", "pengadilan tinggi", "kejaksaan agung",
+    "kementerian keuangan", "kementerian hukum", "kemenkumham", "kemenkeu",
+    "kementerian dalam negeri", "kemendagri",
+    "badan pemeriksa keuangan", "badan intelijen negara",
+    "dewan perwakilan rakyat", "majelis permusyawaratan rakyat",
+    # Media
+    "tempo co", "detik com", "kompas com", "suara com", "cnbc indonesia",
+    # Frasa non-lokasi
+    "paripurna", "sidang paripurna", "rapat paripurna",
+    "corporate banking", "investment banking", "retail banking",
+    # Nama yang sering jadi false positive
+    "keterbukaan informasi", "bursa efek", "bursa efek indonesia",
+}

@@ -18,39 +18,46 @@ def load_embedding_model():
 def encode_corpus(model, corpus, cache_path=EMBEDDINGS_CACHE_FILE):
     """
     Encode seluruh corpus menjadi embedding vectors.
-    Hasil di-cache ke file .npy agar tidak perlu encoding ulang.
-
-    Args:
-        model: SentenceTransformer model
-        corpus: List of document content (GUNAKAN kolom 'content' ASLI,
-                bukan 'processed_content', karena model multilingual
-                sudah dilatih pada teks natural)
-        cache_path: Path untuk menyimpan/memuat cache embeddings
-    Returns:
-        numpy array of shape (n_docs, embedding_dim)
+    Menggunakan cache jika jumlah dokumen masih sama.
     """
-    # Cek apakah cache sudah ada
-    if os.path.exists(cache_path):
-        print(f"Memuat embeddings dari cache '{cache_path}'...")
-        embeddings = np.load(cache_path)
-        print(f"Embeddings dimuat dari cache! Shape: {embeddings.shape}")
-        return embeddings
 
-    # Jika belum ada cache, encode corpus
-    print(f"Encoding {len(corpus)} dokumen (ini bisa memakan waktu 30-60 detik)...")
-    
-    # Pastikan semua elemen corpus adalah string
     corpus_clean = [str(text) for text in corpus]
-    
+
+    # ==========================
+    # Cek cache
+    # ==========================
+    if os.path.exists(cache_path):
+
+        print(f"\nMenemukan cache: {cache_path}")
+
+        embeddings = np.load(cache_path)
+
+        print(f"Shape cache      : {embeddings.shape}")
+        print(f"Jumlah dokumen   : {len(corpus_clean)}")
+
+        if embeddings.shape[0] == len(corpus_clean):
+            print("✓ Cache sesuai. Menggunakan embeddings yang sudah ada.")
+            return embeddings
+
+        print("⚠ Cache tidak sesuai dengan dataset.")
+        print("⚠ Embedding akan dibuat ulang...\n")
+
+    # ==========================
+    # Encode ulang
+    # ==========================
+    print(f"Encoding {len(corpus_clean):,} dokumen...")
+
     embeddings = model.encode(
         corpus_clean,
         show_progress_bar=True,
-        batch_size=64
+        batch_size=64,
+        convert_to_numpy=True
     )
 
-    # Simpan ke cache
     np.save(cache_path, embeddings)
-    print(f"Embeddings disimpan ke '{cache_path}'! Shape: {embeddings.shape}")
+
+    print(f"\n✓ Embeddings disimpan ke '{cache_path}'")
+    print(f"Shape embeddings : {embeddings.shape}")
 
     return embeddings
 
