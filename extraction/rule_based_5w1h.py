@@ -89,17 +89,48 @@ def _strip_dateline(content: str) -> tuple:
 
 
 # =============================================================================
-# WHAT - Extractive Summarization
+# WHAT - Multi-event Extractive Summarization
 # =============================================================================
-# extract_what (lebih general)
+
+# Penanda pergantian topik/event dalam satu artikel
+_TOPIC_SHIFT_MARKERS = re.compile(
+    r'\b(sementara itu|di sisi lain|selain itu|adapun|terkait hal ini|'
+    r'terkait itu|dalam kesempatan yang sama|sebelumnya|sebelumnya|'
+    r'lebih lanjut|di samping itu|tak hanya itu|tidak hanya itu|'
+    r'di tempat terpisah|pada kesempatan lain)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_new_event_sentence(sent: str, prev_sents: list) -> bool:
+    """
+    Deteksi apakah kalimat ini memperkenalkan event/topik baru.
+    Kriteria: mengandung topic shift marker DAN subjek berbeda dari
+    kalimat sebelumnya (heuristik sederhana: kata benda kapital baru).
+    """
+    if not _TOPIC_SHIFT_MARKERS.search(sent):
+        return False
+    # Cek apakah ada entitas kapital baru yang tidak muncul di kalimat sebelumnya
+    prev_text = " ".join(prev_sents).lower()
+    new_caps = re.findall(r'\b[A-Z][a-z]{2,}\b', sent)
+    for cap in new_caps:
+        if cap.lower() not in prev_text:
+            return True
+    return False
+
+
 def extract_what(content: str, title: str) -> str:
     """
     WHAT: Prioritaskan kalimat pertama yang informatif (lead sentence).
-    Ini biasanya paling baik untuk berita.
+    Jika artikel berisi multi-event (ada topic shift marker yang jelas),
+    tambahkan sinyal event kedua sebagai konteks.
+
+    Return: string kalimat utama (+ konteks event kedua jika ada dan singkat).
     """
     sentences = _split_sentences(content)
-    
-    for sent in sentences[:5]:  # cek 5 kalimat pertama
+
+    lead = None
+    for sent in sentences[:5]:
         sent = sent.strip()
         if len(sent) < 30:
             continue
@@ -107,18 +138,43 @@ def extract_what(content: str, title: str) -> str:
             continue
         if re.search(r"(klik|follow|download|subscribe|simak|lihat juga)", sent, re.IGNORECASE):
             continue
-        
-        # Batasi panjang dengan potong rapi
-        if len(sent) > 220:
-            truncated = sent[:220]
-            last_space = truncated.rfind(' ')
-            if last_space > 80:
-                sent = truncated[:last_space]
-        
-        return sent
-    
-    # Fallback ke judul jika tidak ada kalimat bagus
-    return title if title else NOT_FOUND
+
+        # Batasi panjang dengan potong rapi di batas klausa (tanda baca)
+        if len(sent) > 250:
+            truncated = sent[:250]
+            last_punct = max(truncated.rfind(','), truncated.rfind('.'), truncated.rfind(';'))
+            if last_punct > 80:
+                sent = truncated[:last_punct] + ('.' if truncated[last_punct] != '.' else '')
+
+        lead = sent
+        break
+
+    if not lead:
+        return title if title else NOT_FOUND
+
+    # Deteksi event kedua — scan proporsional terhadap panjang artikel
+    # Batas: 60% dari total kalimat, minimal sampai kalimat ke-15,
+    # maksimal kalimat ke-30. Artikel pendek (< 15 kalimat) tetap aman.
+    total = len(sentences)
+    scan_end = max(15, min(30, int(total * 0.6)))
+    second_event = None
+    for sent in sentences[5:scan_end]:
+        sent = sent.strip()
+        if len(sent) < 30 or _is_scraping_artifact(sent):
+            continue
+        if _is_new_event_sentence(sent, sentences[:5]):
+            if len(sent) > 200:
+                truncated = sent[:200]
+                last_punct = max(truncated.rfind(','), truncated.rfind('.'), truncated.rfind(';'))
+                if last_punct > 60:
+                    sent = truncated[:last_punct] + ('.' if truncated[last_punct] != '.' else '')
+            second_event = sent
+            break
+
+    if second_event:
+        return f"{lead} Selain itu, {second_event[0].lower()}{second_event[1:]}"
+
+    return lead
 
 
 # =============================================================================
@@ -190,13 +246,24 @@ def extract_5w1h(article: Dict[str, Any]) -> Dict[str, Any]:
     where_result = extract_where(clean_content, dateline_location=dateline_location)
     who_result = extract_who(clean_content, title=title)
     
+    # WHAT dihitung duluan agar bisa di-pass ke HOW untuk anti-duplikasi
+    what_result = extract_what(clean_content, title)
+
+    # HOW dihitung sebelum WHY — hasilnya di-pass ke extract_why supaya
+    # WHY bisa exclude kalimat yang sudah dipakai HOW
+    how_result = extract_how(clean_content, title, what_sentence=what_result)
+
     return {
-        "what": extract_what(clean_content, title),
+        "what": what_result,
         "who": who_result,
         "when": extract_when(clean_content, metadata_date),
         "where": where_result,
-        "why": extract_why(clean_content),
-        "how": extract_how(clean_content, title),
+        "why": extract_why(
+            clean_content,
+            what_sentence=what_result,
+            how_sentence=how_result,
+        ),
+        "how": how_result,
     }
 
 

@@ -67,6 +67,8 @@ def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 150):
        model -- ini akar masalah utama versi lama (cuma lihat 1500 char
        pertama, padahal 76% artikel di dataset >1500 char).
     3. Overlap mencegah entity di batas potongan ke-cut jadi 2 fragmen rusak.
+    4. Pemotongan selalu di batas spasi -- mencegah nama terpotong di tengah
+       kata yang menjadi penyebab truncation bug "Prabowo Sub".
 
     Returns: List[(chunk_text, global_offset)]
     """
@@ -78,10 +80,19 @@ def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 150):
     n = len(text)
     while start < n:
         end = min(start + chunk_size, n)
+
+        # Snap end ke batas spasi terdekat agar tidak potong di tengah kata/nama
+        if end < n:
+            snap = text.rfind(" ", start, end)
+            if snap > start + (chunk_size // 2):
+                # Hanya snap jika ada spasi yang cukup jauh dari awal chunk
+                end = snap + 1  # inklusif spasi agar offset konsisten
+
         chunks.append((text[start:end], start))
-        if end == n:
+        if end >= n:
             break
         start = end - overlap
+
     return chunks
 
 
@@ -98,10 +109,17 @@ def _merge_adjacent_entities(entities: list, original_text: str) -> list:
     ini tanda kuat keduanya adalah SATU entity yang terpecah, bukan dua
     entity berbeda yang kebetulan bersebelahan.
 
-    Strategi: kalau entity[i].end == entity[i+1].start (bersambungan TANPA
-    gap), dan tidak ada spasi di antara mereka di teks asli, gabungkan jadi
-    1 entity. Label diambil dari yang confidence-nya lebih tinggi, score
-    di-rata-rata.
+    Strategi merge (dua kondisi):
+    1. entity[i].end == entity[i+1].start → fragmen langsung bersambungan,
+       gabungkan dengan concat langsung (tanpa spasi).
+    2. entity[i].end + 1 == entity[i+1].start DAN karakter di antara keduanya
+       adalah spasi → fragmen dipisah satu spasi, gabungkan dengan spasi.
+       Ini menangani kasus "Prabowo Sub" yang muncul sebagai dua token NER
+       ["Prabowo", "Sub"] dengan gap satu spasi.
+    Kondisi tambahan: label harus sama ATAU salah satunya adalah fragmen
+    pendek (<= 3 char) yang jelas bukan entity mandiri.
+
+    Label diambil dari fragmen dengan confidence tertinggi.
 
     PENTING: fungsi ini harus dipanggil SEBELUM _is_valid_span, supaya
     span yang sudah digabung tidak keburu ditolak oleh validator (yang
@@ -122,18 +140,37 @@ def _merge_adjacent_entities(entities: list, original_text: str) -> list:
         j = i + 1
         while j < len(entities_sorted):
             nxt = entities_sorted[j]
-            # Bersambungan persis tanpa gap (tidak ada spasi/separator di antaranya)
-            if nxt["start"] == current["end"]:
-                current["text"] = current["text"] + nxt["text"]
-                current["end"] = nxt["end"]
-                # pakai score yang lebih tinggi sebagai representasi confidence gabungan
-                current["score"] = max(current["score"], nxt["score"])
-                # kalau label beda, pertahankan label dari fragmen confidence tertinggi
-                if nxt["score"] > entities_sorted[i]["score"]:
+            gap = nxt["start"] - current["end"]
+
+            # Kondisi 1: bersambungan persis tanpa gap
+            is_no_gap = (gap == 0)
+
+            # Kondisi 2: dipisah tepat satu spasi di teks asli
+            is_one_space = (
+                gap == 1
+                and current["end"] < len(original_text)
+                and original_text[current["end"]] == " "
+            )
+
+            # Hanya merge jika label sama ATAU salah satu fragmen sangat pendek
+            # (fragmen <= 3 char hampir pasti bukan entity mandiri)
+            same_label   = (current["label"] == nxt["label"])
+            short_frag   = (
+                len(current["text"].strip()) <= 3
+                or len(nxt["text"].strip()) <= 3
+            )
+
+            if (is_no_gap or is_one_space) and (same_label or short_frag):
+                separator = "" if is_no_gap else " "
+                current["text"] = current["text"] + separator + nxt["text"]
+                current["end"]  = nxt["end"]
+                if nxt["score"] > current["score"]:
+                    current["score"] = nxt["score"]
                     current["label"] = nxt["label"]
                 j += 1
             else:
                 break
+
         merged.append(current)
         i = j
 
