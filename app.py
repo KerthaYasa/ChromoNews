@@ -614,11 +614,11 @@ with tab_hasil:
             for art in retrieved_articles:
                 if ai_ready:
                     try:
-                        paragraph = paraphrase_5w1h(art['w5h1'], title=art['title'], query=query)
+                        paragraph = paraphrase_5w1h(art['w5h1'], title=art['title'], query=query, content=art['content'])
                     except Exception:
-                        paragraph = _fallback_paragraph(art['w5h1'], art['title'])
+                        paragraph = _fallback_paragraph(art['w5h1'], art['title'], art['content'])
                 else:
-                    paragraph = _fallback_paragraph(art['w5h1'], art['title'])
+                    paragraph = _fallback_paragraph(art['w5h1'], art['title'], art['content'])
                 art['paragraph'] = paragraph
         
         # ===== TAMPILAN HASIL =====
