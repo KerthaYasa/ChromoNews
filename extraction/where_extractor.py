@@ -1,7 +1,16 @@
 """
-where_extractor.py - v5 (FIXED)
+where_extractor.py - v6 (+ WHERE_EXACT_BLACKLIST)
 =========================
 WHERE: NER primary + Gazetteer fallback + blacklist ketat
+
+Changelog:
+  v6 — Tambah filter WHERE_EXACT_BLACKLIST dari patterns.py (institusi
+       hukum/pemerintah, media, frasa non-lokasi seperti "sidang
+       paripurna", "bursa efek indonesia") — sebelumnya hanya
+       NOT_LOCATION_PATTERNS (regex) dan WHERE_AMBIGUOUS_NOUNS yang
+       dipakai, exact-match blacklist belum tersambung sama sekali.
+  v5 — WHERE_AMBIGUOUS_NOUNS filter + WHERE_LOCATION_NOUNS fallback
+       pattern (ditambahkan sebelumnya).
 """
 
 import re
@@ -23,9 +32,56 @@ def inject_ner_pipeline(pipeline):
 
 _GAZETTEER_CACHE = None
 
+# =============================================================================
+# PENALTI LOKASI GENERIK (level negara)
+# =============================================================================
+# "Indonesia" valid secara NER tapi terlalu generik dibanding kandidat kota/
+# provinsi yang lebih spesifik dalam artikel yang sama. Beri penalti kecil
+# supaya kalah ranking KECUALI dia satu-satunya kandidat yang ada.
+_COUNTRY_LEVEL_NAMES = {"indonesia"}
+_COUNTRY_PENALTY = 0.8
+
+
+# =============================================================================
+# EXCLUDE KALIMAT TOPIC-SHIFT (event lain / masa lalu)
+# =============================================================================
+# Sama seperti _TOPIC_SHIFT_MARKERS di rule_based_5w1h.py (extract_what),
+# tapi dipakai di sini untuk MENGECUALIKAN kalimat yang membicarakan
+# peristiwa/lokasi lain dari pencarian WHERE utama. Contoh: "Sebelumnya,
+# Anies mendapat penolakan di Aceh..." — Aceh bukan lokasi kejadian utama.
+_WHERE_TOPIC_SHIFT_MARKERS = re.compile(
+    r'^\s*(sebelumnya|selain itu|di tempat terpisah|di sisi lain|'
+    r'pada kesempatan lain)\b',
+    re.IGNORECASE,
+)
+
+
+def _get_excluded_char_ranges(content: str) -> list:
+    """
+    Kembalikan list (start, end) rentang karakter dari kalimat yang diawali
+    topic-shift marker, untuk dikecualikan dari kandidat WHERE utama.
+    """
+    from extraction.text_utils import split_sentences
+    ranges = []
+    cursor = 0
+    for sent in split_sentences(content):
+        idx = content.find(sent, cursor)
+        if idx == -1:
+            continue
+        end = idx + len(sent)
+        if _WHERE_TOPIC_SHIFT_MARKERS.search(sent):
+            ranges.append((idx, end))
+        cursor = end
+    return ranges
+
+
+def _is_in_excluded_range(start, excluded_ranges: list) -> bool:
+    if start is None:
+        return False
+    return any(r_start <= start < r_end for r_start, r_end in excluded_ranges)
 
 def _load_gazetteer():
-    """Load lokasi dari CSV"""
+    """Load lokasi dari CSV — untuk gazetteer_bonus lookup saja (urutan tidak relevan di sini)."""
     global _GAZETTEER_CACHE
     if _GAZETTEER_CACHE is not None:
         return _GAZETTEER_CACHE
@@ -72,6 +128,17 @@ def _basic_filter(name: str) -> bool:
     return True
 
 
+def _is_exact_blacklisted(name: str, blacklist: set) -> bool:
+    """
+    Cek exact-match terhadap WHERE_EXACT_BLACKLIST dari patterns.py
+    (institusi hukum/pemerintah, media, frasa non-lokasi). Beda dengan
+    NOT_LOCATION_PATTERNS (regex substring) — ini exact match penuh
+    setelah normalisasi, supaya tidak overzealous membuang kandidat
+    yang cuma sekadar MENGANDUNG kata serupa.
+    """
+    return _normalize_key(name) in blacklist
+
+
 # =============================================================================
 # RANKING
 # =============================================================================
@@ -103,6 +170,7 @@ def _score_and_rank(candidates: list, content_len: int, max_results: int = 4) ->
                 absorbed.add(k2)
 
     scored = []
+    country_level = []
     for key, items in merged.items():
         freq = len(items)
         first_pos = min((it["start"] for it in items if it["start"] is not None),
@@ -121,10 +189,22 @@ def _score_and_rank(candidates: list, content_len: int, max_results: int = 4) ->
 
         total_score = (freq * 1.0 * weight) + (position_bonus * 1.0) + \
                       (avg_conf * 0.5) + gazetteer_bonus
-        scored.append((total_score, display_name))
+
+        # Lokasi level-negara: pisahkan ke bucket sendiri, taruh di akhir
+        # daftar kecuali dia satu-satunya kandidat yang ada. Skor tinggi
+        # akibat freq/posisi tidak relevan untuk menentukan spesifisitas.
+        if key in _COUNTRY_LEVEL_NAMES:
+            country_level.append((total_score, display_name))
+        else:
+            scored.append((total_score, display_name))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [name for _, name in scored[:max_results]]
+    country_level.sort(key=lambda x: x[0], reverse=True)
+
+    # Kandidat non-negara diprioritaskan penuh; negara cuma dipakai buat
+    # mengisi sisa slot kalau kandidat spesifik tidak cukup.
+    combined = scored + country_level
+    return [name for _, name in combined[:max_results]]
 
 
 # =============================================================================
@@ -132,15 +212,10 @@ def _score_and_rank(candidates: list, content_len: int, max_results: int = 4) ->
 # =============================================================================
 
 def extract_where(content: str, max_results: int = 4, dateline_location: str = None) -> list:
-    """
-    WHERE: NER sebagai metode utama + blacklist ketat.
-    Gazetteer hanya sebagai fallback jika NER tidak menghasilkan hasil valid.
-    """
     global _NER_PIPELINE
 
     candidates = []
-    
-    # === NER PRIMARY ===
+
     if _NER_PIPELINE is not None:
         entities = run_ner_chunked(_NER_PIPELINE, content)
         candidates = [
@@ -148,34 +223,50 @@ def extract_where(content: str, max_results: int = 4, dateline_location: str = N
             if e["label"] in WHERE_LABEL_PRIORITY and _basic_filter(e["text"])
         ]
 
-    # === Blacklist tambahan dari patterns.py ===
     try:
-        from extraction.patterns import NOT_LOCATION_PATTERNS
+        from extraction.patterns import (
+            NOT_LOCATION_PATTERNS,
+            WHERE_AMBIGUOUS_NOUNS,
+            WHERE_EXACT_BLACKLIST,
+        )
         filtered = []
         for e in candidates:
-            if not any(re.search(p, e["text"], re.IGNORECASE) for p in NOT_LOCATION_PATTERNS):
-                filtered.append(e)
+            text_lower = e["text"].lower().strip()
+            if text_lower in WHERE_AMBIGUOUS_NOUNS:
+                continue
+            if _is_exact_blacklisted(e["text"], WHERE_EXACT_BLACKLIST):
+                continue
+            if any(re.search(p, e["text"], re.IGNORECASE) for p in NOT_LOCATION_PATTERNS):
+                continue
+            filtered.append(e)
         candidates = filtered
-    except:
+    except ImportError:
         pass
 
-    # === Dateline boost (sangat reliable) ===
+    # --- BARU: exclude kandidat dari kalimat topic-shift (event lain) ---
+    excluded_ranges = _get_excluded_char_ranges(content)
+    if excluded_ranges:
+        non_shifted = [c for c in candidates if not _is_in_excluded_range(c["start"], excluded_ranges)]
+        # Hanya buang jika masih tersisa kandidat lain setelah exclusion —
+        # kalau semua kandidat kebetulan ada di kalimat topic-shift
+        # (artikel pendek/aneh), lebih baik tetap pakai semua drpd kosong.
+        if non_shifted:
+            candidates = non_shifted
+
     if dateline_location and len(dateline_location) >= 3:
         candidates.append({
-            "text": dateline_location, 
+            "text": dateline_location,
             "label": "GPE",
-            "start": 0, 
-            "end": len(dateline_location), 
+            "start": 0,
+            "end": len(dateline_location),
             "score": 0.95
         })
 
-    # Jika ada hasil dari NER + dateline
     if candidates:
         ranked = _score_and_rank(candidates, len(content), max_results)
         if ranked:
             return ranked
 
-    # === FALLBACK ke Gazetteer ===
     return extract_where_fallback(content, max_results)
 
 
@@ -184,20 +275,19 @@ def extract_where(content: str, max_results: int = 4, dateline_location: str = N
 # =============================================================================
 
 def extract_where_fallback(content: str, max_results: int = 4) -> list:
-    gazetteer = _load_gazetteer()
-    content_lower = content.lower()
+    from extraction.gazetteer import find_locations_in_text
+
     candidates = []
 
-    for loc in gazetteer:
-        if len(loc) < 3:
-            continue
-        for m in re.finditer(re.escape(loc), content_lower):
-            cap = " ".join(w.capitalize() for w in loc.split())
+    # Pakai fungsi gazetteer resmi — sudah benar: word-boundary + longest-match-first
+    # (list dari load_locations() sudah terurut panjang->pendek, jangan diubah jadi set).
+    for loc in find_locations_in_text(content, max_results=10):
+        for m in re.finditer(r"\b" + re.escape(loc) + r"\b", content, re.IGNORECASE):
             candidates.append({
-                "text": cap, 
+                "text": loc,
                 "label": "GPE",
-                "start": m.start(), 
-                "end": m.end(), 
+                "start": m.start(),
+                "end": m.end(),
                 "score": 0.5
             })
 
@@ -207,12 +297,41 @@ def extract_where_fallback(content: str, max_results: int = 4) -> list:
         name = m.group(1)
         if _basic_filter(name):
             candidates.append({
-                "text": name, 
+                "text": name,
                 "label": "LOC",
-                "start": m.start(), 
-                "end": m.end(), 
+                "start": m.start(),
+                "end": m.end(),
                 "score": 0.3
             })
+
+    # Pola lokasi spesifik: daerah, wilayah, kawasan + Nama (misal: "kawasan Sudirman")
+    try:
+        from extraction.patterns import WHERE_LOCATION_NOUNS
+        loc_nouns = "|".join(re.escape(n) for n in WHERE_LOCATION_NOUNS)
+        pattern2 = rf'\b(?:{loc_nouns})\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}})\b'
+        for m in re.finditer(pattern2, content, re.IGNORECASE):
+            name = m.group(1)
+            # Karena ini mengikuti noun lokasi eksplisit, confidennya sedikit lebih tinggi
+            if _basic_filter(name):
+                candidates.append({
+                    "text": name,
+                    "label": "LOC",
+                    "start": m.start(),
+                    "end": m.end(),
+                    "score": 0.4
+                })
+    except ImportError:
+        pass
+
+    # === Blacklist exact-match juga dipakai di fallback gazetteer ===
+    try:
+        from extraction.patterns import WHERE_EXACT_BLACKLIST
+        candidates = [
+            c for c in candidates
+            if not _is_exact_blacklisted(c["text"], WHERE_EXACT_BLACKLIST)
+        ]
+    except ImportError:
+        pass
 
     if not candidates:
         return ["Tidak disebutkan dalam artikel"]

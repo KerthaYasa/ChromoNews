@@ -2,8 +2,12 @@
 patterns.py
 ============
 Kumpulan pattern (regex) dan kamus kata kunci untuk ekstraksi 5W1H.
-REVISI v5: Perbaikan DATE_PATTERNS (hapus relatif), WHERE filter organisasi,
-           WHO gelar diperluas, WHY konektor diperkuat.
+REVISI v6: Update berdasarkan analisis dataset preprocessed_news_sample.csv
+           (3.000 artikel) — lihat linguistic_analysis_5w1h.md section 6a.
+           - Tambah marker WHY baru: gegara, gara-gara, alasannya, penyebab, faktor, soalnya
+           - Tambah marker HOW baru: dengan skema, dengan metode, yakni dengan, yaitu dengan
+           - Tambah reporting verbs baru: pungkas, sambung, bebernya, tutupnya
+           - Tambah disambiguation rule untuk marker ambigu: untuk, secara, dengan
 """
 
 import re
@@ -39,11 +43,17 @@ DATE_PATTERN_SHORTHAND = re.compile(
     re.IGNORECASE,
 )
 
-# CATATAN: DATE_PATTERN_RELATIVE DIHAPUS — "hari ini", "kemarin", "besok"
+# Pola tambahan: "pukul HH.MM" / "pukul HH:MM" — cukup sering (516x di sampel)
+DATE_PATTERN_PUKUL = re.compile(
+    r"\bpukul\s+\d{1,2}[.:]\d{2}(?:\s*(?:WIB|WITA|WIT))?\b",
+    re.IGNORECASE,
+)
+
+# CATATAN: DATE_PATTERN_RELATIVE DIHAPUS dari DATE_PATTERNS — "hari ini", "kemarin", "besok"
 # tidak akan dimasukkan ke hasil WHEN karena tidak informatif (tidak absolut).
 # Akan digantikan oleh metadata_date jika tersedia.
 DATE_PATTERN_RELATIVE = re.compile(
-    r"(?i)\b(?:hari ini|kemarin|besok|tadi malam|malam tadi|sore tadi|pagi tadi)\b"
+    r"(?i)\b(?:hari ini|kemarin|besok|tadi malam|malam tadi|sore tadi|pagi tadi|dini hari|saat ini|tahun ini|tahun lalu)\b"
 )
 
 DATE_PATTERNS = [
@@ -51,6 +61,7 @@ DATE_PATTERNS = [
     DATE_PATTERN_FULL,
     DATE_PATTERN_NUMERIC,
     DATE_PATTERN_SHORTHAND,
+    DATE_PATTERN_PUKUL,
     # DATE_PATTERN_RELATIVE SENGAJA TIDAK DIMASUKKAN
 ]
 
@@ -58,19 +69,42 @@ DATE_PATTERNS = [
 # =============================================================================
 # 2. KATA PENGHUBUNG KAUSAL (untuk WHY)
 # =============================================================================
-CAUSAL_CONNECTORS = [
-    "atas dasar itulah", "atas dasar itu", "atas dasar",
+# Tier 1: frekuensi tinggi & ambiguitas rendah -> confidence tinggi
+CAUSAL_CONNECTORS_TIER1 = [
+    "karena", "dikarenakan",
+    "sehingga",
+    "akibat dari", "akibat",
+    "lantaran",
+    "menyebabkan", "mengakibatkan",
     "disebabkan oleh", "disebabkan karena", "disebabkan",
     "diakibatkan oleh", "diakibatkan",
-    "akibat dari", "akibat",
-    "karena", "lantaran", "sebab", "imbas dari", "imbas",
-    "dipicu oleh", "dipicu",
-    "buntut dari", "buntut",
-    "diduga karena", "dikarenakan",
+    "atas dasar itulah", "atas dasar itu", "atas dasar",
 ]
+
+# Tier 2: frekuensi lebih rendah / perlu konteks, tapi cukup reliabel
+CAUSAL_CONNECTORS_TIER2 = [
+    "imbas dari", "imbas",
+    "dipicu oleh", "dipicu", "memicu",
+    "buntut dari", "buntut",
+    "diduga karena",
+    "gara-gara", "gegara",  # BARU — ditemukan 31x di sampel, belum ada sebelumnya
+    "penyebab",              # BARU — 129x, biasanya nominal ("penyebab kebakaran")
+    "faktor",                 # BARU — 101x, biasanya nominal ("faktor utama")
+    "alasannya",              # BARU — 43x, penanda motif eksplisit
+]
+
+# "sebab" sengaja dipisah: ambigu antara nomina ("alasan") dan konektor.
+# Gunakan hanya jika TIDAK diikuti langsung oleh kata benda umum seperti
+# "itu", "tersebut", "ini" tanpa verba setelahnya (lihat disambiguation di bawah).
+CAUSAL_CONNECTORS_AMBIGUOUS = ["sebab", "dampak"]
+
+# Gabungan untuk kompatibilitas mundur dengan kode lama yang memakai CAUSAL_CONNECTORS
+CAUSAL_CONNECTORS = CAUSAL_CONNECTORS_TIER1 + CAUSAL_CONNECTORS_TIER2
+
 INTER_SENTENCE_CAUSAL = [
     "pasalnya", "oleh karena itu", "sebab itu", "karenanya", "alhasil",
     "hal itu disebabkan", "hal tersebut disebabkan",
+    "soalnya",  # BARU — 14x, informal tapi reliabel sebagai penanda kausal awal kalimat
 ]
 
 # =============================================================================
@@ -82,6 +116,12 @@ PURPOSE_CONNECTORS = [
     "agar", "supaya", "berharap", "diharapkan",
 ]
 
+# "untuk" SENGAJA TIDAK dimasukkan langsung ke PURPOSE_CONNECTORS.
+# Frekuensi 8.344x di sampel, tapi hanya ~15-20% benar-benar menandai WHY;
+# sisanya preposisi biasa ("rumah untuk dijual"). Gunakan UNTUK_PURPOSE_PATTERN
+# di bagian disambiguation rules di bawah untuk memvalidasi konteksnya.
+
+
 # =============================================================================
 # 3. KATA PENGHUBUNG CARA/MODUS (untuk HOW)
 # =============================================================================
@@ -91,6 +131,12 @@ METHOD_CONNECTORS = [
     "dengan memanfaatkan", "memanfaatkan",
     "secara langsung", "langsung mendatangi", "dengan mendatangi",
     "berawal dari", "bermula dari", "diawali dari", "diawali",
+    # --- BARU (dari analisis dataset, section 6a) ---
+    "dengan skema",     # 10x
+    "dengan metode",    # 14x
+    "yakni dengan",     # 14x
+    "yaitu dengan",     # 9x
+    "via",               # 40x — umum untuk saluran/media ("via telepon", "via WhatsApp")
 ]
 
 METHOD_VERB_PATTERN = re.compile(
@@ -98,6 +144,12 @@ METHOD_VERB_PATTERN = re.compile(
 )
 
 HOW_FALLBACK_CONNECTORS = ["usai", "setelah"]
+
+# "secara" TIDAK dimasukkan sebagai method connector langsung karena sangat ambigu
+# (1.567x di sampel, sering hanya adverbia: "secara resmi", "secara bertahap").
+# Gunakan SECARA_METHOD_PATTERN di bawah untuk memvalidasi apakah benar menjelaskan
+# mekanisme, bukan sekadar adverbia formalitas.
+
 
 # =============================================================================
 # 4. KATA KERJA PELAPORAN (reporting verbs)
@@ -107,6 +159,10 @@ REPORTING_VERBS = [
     "terang", "imbuh", "tambah", "lanjut", "kata dia", "menurut",
     "tuturnya", "katanya", "ujarnya", "jelasnya", "tegasnya",
     "menyebut", "mengatakan", "menyatakan", "menuturkan",
+    "tandas", "tandasnya", "pungkas",  # "tandas"/"tandasnya" sudah lazim; "pungkas" BARU (60x)
+    "sambung", "sambungnya",           # BARU — 44x, menandai kutipan lanjutan
+    "bebernya", "membeberkan",         # BARU — 17x
+    "tutupnya",                          # BARU — 34x, menandai kutipan penutup
 ]
 
 # =============================================================================
@@ -123,6 +179,7 @@ TITLE_PREFIXES = [
     "Dokter", "Profesor", "Prof", "Dr", "Sekretaris", "Deputi",
     "Mantan", "Eks", "Tersangka", "Terdakwa", "Saksi",
     "Kabid", "Kasatgas", "Kasatreskrim", "Pimpinan",
+    "Juru Bicara",  # BARU — 85x, cukup umum ("Juru Bicara KPK Ali Fikri")
 ]
 
 # Lembaga/instansi dikenal
@@ -147,7 +204,18 @@ NOT_LOCATION_PATTERNS = [
     r"\bTempo\b", r"\bKompas\b", r"\bDetik\b",
     # Kata-kata yang sering muncul dalam nama organisasi tapi bukan lokasi
     r"\bBursa\b", r"\bInformasi\b", r"\bKeterbukaan\b",
+    # Nomina lokasi generik yang sering ambigu dengan organisasi (mis. "kantor KPK")
+    # -> ditangani lewat WHERE_AMBIGUOUS_NOUNS di bawah, bukan hard-blacklist,
+    #    karena "kantor" & "gedung" TETAP valid untuk lokasi fisik pada banyak kasus.
 ]
+
+# Nomina lokasi yang sering mengikuti preposisi "di/ke/dari" tapi berpotensi ambigu
+# (butuh cek apakah diikuti nama organisasi atau nama tempat asli).
+WHERE_AMBIGUOUS_NOUNS = ["kantor", "gedung", "lokasi"]
+
+# Nomina lokasi yang cukup reliabel sebagai penanda WHERE eksplisit
+WHERE_LOCATION_NOUNS = ["daerah", "wilayah", "kawasan", "kompleks", "setempat"]
+
 
 # =============================================================================
 # 6. POLA DATELINE
@@ -187,3 +255,79 @@ WHERE_EXACT_BLACKLIST = {
     # Nama yang sering jadi false positive
     "keterbukaan informasi", "bursa efek", "bursa efek indonesia",
 }
+
+
+# =============================================================================
+# 9. DISAMBIGUATION RULES — untuk marker frekuensi tinggi tapi ambigu
+# =============================================================================
+# Ketiga marker ini TIDAK dipakai sebagai trigger langsung, karena mayoritas
+# kemunculannya di dataset BUKAN sinyal 5W1H yang valid (lihat catatan
+# ambiguitas di linguistic_analysis_5w1h.md section 1a/2a). Gunakan pattern
+# di bawah untuk memvalidasi konteks sebelum menandai sebagai WHY/HOW.
+
+# "untuk" -> valid sebagai WHY (tujuan) hanya jika diikuti verba (imbuhan
+# me-/di-/ber-/ter-/per-), bukan langsung diikuti nomina/objek biasa.
+# Contoh valid: "... dibentuk untuk mengusut ..." (untuk + verba)
+# Contoh TIDAK valid: "rumah untuk dijual", "dana untuk masyarakat" (nomina)
+UNTUK_PURPOSE_PATTERN = re.compile(
+    r"\buntuk\s+(?:meng|mem|men|meny|me|di|ber|ter|per)[a-z]+\b", re.IGNORECASE
+)
+
+# "secara" -> valid sebagai HOW (mekanisme) hanya jika diikuti kata yang
+# menjelaskan cara/metode konkret (bukan adverbia formalitas generik seperti
+# "resmi", "bertahap", "keseluruhan"). Whitelist kata setelah "secara" yang
+# benar-benar menjelaskan mekanisme:
+SECARA_METHOD_WHITELIST = [
+    "online", "daring", "manual", "elektronik", "digital", "tunai",
+    "bertahap", "paksa", "sembunyi-sembunyi", "diam-diam", "terang-terangan",
+    "langsung", "tatap muka", "virtual", "kolektif", "mandiri",
+]
+SECARA_METHOD_PATTERN = re.compile(
+    r"\bsecara\s+(" + "|".join(SECARA_METHOD_WHITELIST) + r")\b",
+    re.IGNORECASE,
+)
+# Kata setelah "secara" yang menandakan BUKAN How (adverbia formalitas/derajat,
+# skip jika match ini) — dipakai sebagai negative filter tambahan.
+SECARA_NON_METHOD_WORDS = [
+    "resmi", "keseluruhan", "umum", "khusus", "pasti", "otomatis",
+    "bersamaan", "bergantian", "signifikan", "drastis", "perlahan",
+]
+
+# "dengan" tanpa verba setelahnya -> kemungkinan besar WHO (kebersamaan),
+# bukan HOW. Contoh: "Jokowi dengan Prabowo" vs "dengan menggunakan kunci T".
+# Gunakan METHOD_VERB_PATTERN (poin 3) sebagai validator utama; jika "dengan"
+# diikuti langsung oleh nama orang/gelar (lihat TITLE_PREFIXES) atau nomina
+# tanpa imbuhan verba, klasifikasikan sebagai non-HOW.
+DENGAN_COMPANION_PATTERN = re.compile(
+    r"\bdengan\s+(?:" + "|".join(re.escape(t) for t in TITLE_PREFIXES) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_valid_why_untuk(text_snippet: str) -> bool:
+    """Cek apakah kemunculan 'untuk' dalam snippet menandakan WHY (tujuan)."""
+    return bool(UNTUK_PURPOSE_PATTERN.search(text_snippet))
+
+
+def is_valid_how_secara(text_snippet: str) -> bool:
+    """Cek apakah kemunculan 'secara' dalam snippet menandakan HOW (mekanisme)."""
+    if SECARA_METHOD_PATTERN.search(text_snippet):
+        return True
+    return False
+
+
+def is_valid_how_dengan(text_snippet: str) -> bool:
+    """Cek apakah 'dengan' menandakan HOW (bukan kebersamaan/WHO)."""
+    if DENGAN_COMPANION_PATTERN.search(text_snippet):
+        return False
+    return bool(METHOD_VERB_PATTERN.search(text_snippet))
+
+
+def is_valid_why_sebab(text_snippet: str) -> bool:
+    """Cek apakah 'sebab' berfungsi sebagai konektor kausal, bukan nomina 'alasan'."""
+    # Jika langsung diikuti "itu"/"tersebut"/"ini" TANPA verba setelahnya,
+    # kemungkinan besar nomina ("sebab itu tidak jelas"), bukan konektor.
+    if re.search(r"\bsebab\s+(itu|tersebut|ini)\b(?!\s+(?:meng|mem|men|meny|me|di|ber|ter))",
+                 text_snippet, re.IGNORECASE):
+        return False
+    return True

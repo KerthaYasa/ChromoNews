@@ -17,6 +17,8 @@ import re
 from collections import defaultdict
 
 from extraction.ner_model import WHO_LABELS, run_ner_chunked
+from extraction.patterns import REPORTING_VERBS, TITLE_PREFIXES
+from extraction.text_utils import split_sentences
 
 _NER_PIPELINE = None
 
@@ -46,6 +48,27 @@ DAY_MONTH_WORDS = {
     "agustus", "september", "oktober", "november", "desember",
 }
 
+# =============================================================================
+# FILTER KATA GABUNGAN (SCRAPING/SPACING ERROR)
+# =============================================================================
+# Contoh nyata di dataset: "AniesBaswedanjuga", "Aniesia" (dari "Anies" +
+# kata berikutnya yang menempel tanpa spasi). Sinyal: ada huruf kapital
+# di TENGAH kata (bukan di awal token), yang tidak wajar untuk nama diri
+# Indonesia biasa. Nama asing dengan pola sah (McDonald, DiCaprio) sangat
+# jarang muncul sebagai subjek berita Indonesia, jadi trade-off ini aman.
+_MID_WORD_CAPITAL_PATTERN = re.compile(r'[a-z][A-Z]')
+
+
+def _looks_concatenated(name: str) -> bool:
+    """
+    Deteksi token yang kemungkinan hasil penggabungan dua kata tanpa
+    spasi (scraping/spacing error), misal 'AniesBaswedanjuga' atau
+    'Aniesia' (dari 'Anies' + kata lain yang menempel).
+    """
+    for token in name.split():
+        if _MID_WORD_CAPITAL_PATTERN.search(token):
+            return True
+    return False
 
 def _basic_filter(name: str) -> bool:
     """Filter ringan."""
@@ -61,6 +84,8 @@ def _basic_filter(name: str) -> bool:
     if re.search(r'\d', name):
         return False
     if len(name.split()) > 6:
+        return False
+    if _looks_concatenated(name):          # <-- tambahan
         return False
     return True
 
@@ -174,9 +199,7 @@ def _is_substring_alias(short: str, long: str) -> bool:
 # =============================================================================
 
 _REPORTING_VERBS = re.compile(
-    r"\b(kata|ujar|ucap|tutur|ungkap|sebut|terang|jelas|sampaik|menurut|"
-    r"membenarkan|menyorot|menilai|menegaskan|mengaku|mengakui|"
-    r"memastikan|mengatakan|menyampaikan|menyebut|berkata|berujar)\b",
+    r"\b(" + "|".join(re.escape(v) for v in REPORTING_VERBS) + r")\b",
     re.IGNORECASE,
 )
 
@@ -194,11 +217,7 @@ _ACTION_VERBS = re.compile(
 _REPORTING_WINDOW = 8
 
 
-def _split_sentences_simple(text: str):
-    """Pecah teks jadi kalimat."""
-    text = re.sub(r'(\b[A-Z]{1,4})\.([\s])', r'\1. \2', text)
-    text = re.sub(r'([a-z0-9"\'\)])(\.)\s*([A-Z])', r'\1.\n\3', text)
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+# Util functions imported from text_utils.py
 
 
 def classify_entity_role(
@@ -214,7 +233,7 @@ def classify_entity_role(
       - "mentioned"    : default.
     """
     name_lower = entity_name.lower()
-    sentences = _split_sentences_simple(content)
+    sentences = split_sentences(content)
     entity_sentences = [s for s in sentences if name_lower in s.lower()]
 
     if not entity_sentences:
@@ -386,7 +405,7 @@ def extract_who(content: str, title: str = "", max_results: int = 5) -> list:
     """
     global _NER_PIPELINE
 
-    sentences = _split_sentences_simple(content)
+    sentences = split_sentences(content)
     first_sentence = sentences[0] if sentences else ""
 
     if _NER_PIPELINE is not None:
@@ -493,15 +512,6 @@ def _restore_full_name(name: str, content: str) -> str:
                 return f"{prefix} {full_last}"
 
     return name
-    """Deteksi nama wilayah secara sederhana."""
-    lower = name.lower()
-    if re.search(
-        r'\b(jawa|sumatera|kalimantan|sulawesi|bali|ntt|ntb|maluku|papua|'
-        r'yogyakarta|jakarta|bandung|surabaya|semarang)\b',
-        lower,
-    ):
-        return True
-    return False
 
 
 # =============================================================================
@@ -509,12 +519,7 @@ def _restore_full_name(name: str, content: str) -> str:
 # =============================================================================
 
 def extract_who_fallback(content: str, max_results: int = 5) -> list:
-    gelar_list = (
-        "Menteri|Kepala|Gubernur|Presiden|Wakil Presiden|Komisaris|"
-        "Direktur|Direktur Utama|Jaksa|Hakim|Kombes|Brigjen|Irjen|"
-        "AKBP|Kompol|Sekretaris|Ketua|Wakil|Staf|Asisten|"
-        "Inspektur|Kepala Badan|Deputi"
-    )
+    gelar_list = "|".join(re.escape(t) for t in TITLE_PREFIXES)
     candidates = []
 
     pattern1 = rf'\b({gelar_list})\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,3}})\b'
@@ -538,7 +543,7 @@ def extract_who_fallback(content: str, max_results: int = 5) -> list:
     if not candidates:
         return ["Tidak disebutkan dalam artikel"]
 
-    sentences = _split_sentences_simple(content)
+    sentences = split_sentences(content)
     first_sentence = sentences[0] if sentences else ""
 
     return _score_and_rank(

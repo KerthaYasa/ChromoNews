@@ -179,16 +179,19 @@ def _merge_adjacent_entities(entities: list, original_text: str) -> list:
 
 def run_ner_chunked(pipe, content: str, chunk_size: int = 1500, overlap: int = 150):
     """
-    Jalankan NER ke SELURUH teks (bukan cuma 1500 char pertama) lewat chunking,
-    lalu kembalikan list entity ter-normalisasi dengan offset GLOBAL
-    (relatif ke `content` penuh, bukan relatif ke chunk).
-
-    Returns: List[dict] dengan keys: text, label, start, end, score
+    v5: tambah dedup lintas-chunk. Karena antar-chunk sengaja overlap
+    (untuk mencegah entity di batas chunk ke-cut), entity yang jatuh di
+    zona overlap akan terdeteksi ulang oleh chunk berikutnya dengan span
+    global yang identik. Tanpa dedup, entity ini dihitung dua kali dan
+    membocorkan bias frekuensi ke scoring WHO/WHERE (freq dipakai
+    langsung sebagai komponen skor di who_extractor & where_extractor).
     """
     if pipe is None or not content:
         return []
 
     all_entities = []
+    seen_spans = set()  # (start, end, text_normalized) yang sudah masuk
+
     for chunk, offset in chunk_text(content, chunk_size, overlap):
         try:
             results = pipe(chunk)
@@ -219,7 +222,6 @@ def run_ner_chunked(pipe, content: str, chunk_size: int = 1500, overlap: int = 1
                 "score": float(ent.get("score", 0.0)),
             })
 
-        # Gabungkan dulu fragmen yang bersambungan SEBELUM validasi span
         chunk_entities = _merge_adjacent_entities(chunk_entities, chunk)
 
         for e in chunk_entities:
@@ -229,6 +231,14 @@ def run_ner_chunked(pipe, content: str, chunk_size: int = 1500, overlap: int = 1
             local_end = e["end"] - offset if e["end"] is not None else None
             if not _is_valid_span(e["text"], chunk, local_start, local_end):
                 continue
+
+            # Dedup lintas-chunk: span global sama persis -> sudah pernah
+            # ditemukan dari chunk sebelumnya (zona overlap), skip.
+            span_key = (e["start"], e["end"], e["text"].lower())
+            if e["start"] is not None and span_key in seen_spans:
+                continue
+            seen_spans.add(span_key)
+
             all_entities.append(e)
 
     return all_entities

@@ -8,19 +8,15 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any
 
-from extraction.patterns import (
-    DATE_PATTERNS,
-    REPORTING_VERBS,
-    TITLE_PREFIXES,
-    SCRAPING_ARTIFACTS,
-)
-from extraction.gazetteer import load_locations
+from extraction.patterns import DATE_PATTERNS
 
 # Import extractor
 from extraction.who_extractor import extract_who
 from extraction.where_extractor import extract_where
 from extraction.how_extractor import extract_how
 from extraction.why_extractor import extract_why
+from extraction.what_extractor import extract_what
+from extraction.text_utils import split_sentences, is_scraping_artifact
 
 
 # =============================================================================
@@ -43,10 +39,10 @@ def inject_ner_pipeline(pipeline):
     """Inject NER pipeline"""
     global _NER_PIPELINE
     _NER_PIPELINE = pipeline
-    
+
     from extraction.who_extractor import inject_ner_pipeline as inject_who
     from extraction.where_extractor import inject_ner_pipeline as inject_where
-    
+
     inject_who(pipeline)
     inject_where(pipeline)
 
@@ -54,22 +50,6 @@ def inject_ner_pipeline(pipeline):
 # =============================================================================
 # UTILITY
 # =============================================================================
-def _split_sentences(text: str) -> List[str]:
-    """Pecah teks menjadi kalimat."""
-    text = re.sub(r'(\b[A-Z]{1,4})\.([\s])', r'\1. \2', text)
-    text = re.sub(r'([a-z0-9"\')\]])(\.)([A-Z])', r'\1.\n\3', text)
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
-    return sentences
-
-
-def _is_scraping_artifact(text: str) -> bool:
-    """Cek artefak scraping."""
-    for pattern in SCRAPING_ARTIFACTS:
-        if pattern.lower() in text.lower():
-            return True
-    return False
-
-
 def _strip_dateline(content: str) -> tuple:
     """Hapus prefix dateline media."""
     match = re.match(r"^([A-Za-z\.]{2,25})\s*,\s*([A-Za-z\.\s]{2,25})\s*[-–]\s*", content)
@@ -79,102 +59,13 @@ def _strip_dateline(content: str) -> tuple:
         location = cand1 if ".CO" in cand2.upper() or "COM" in cand2.upper() else cand2
         clean = content[match.end():].strip()
         return clean, location
-    
+
     match = re.match(r"^([A-Z][\w\.\s]{2,25})\s*[-–]\s*", content)
     if match:
         clean = content[match.end():].strip()
         return clean, None
-    
+
     return content, None
-
-
-# =============================================================================
-# WHAT - Multi-event Extractive Summarization
-# =============================================================================
-
-# Penanda pergantian topik/event dalam satu artikel
-_TOPIC_SHIFT_MARKERS = re.compile(
-    r'\b(sementara itu|di sisi lain|selain itu|adapun|terkait hal ini|'
-    r'terkait itu|dalam kesempatan yang sama|sebelumnya|sebelumnya|'
-    r'lebih lanjut|di samping itu|tak hanya itu|tidak hanya itu|'
-    r'di tempat terpisah|pada kesempatan lain)\b',
-    re.IGNORECASE,
-)
-
-
-def _is_new_event_sentence(sent: str, prev_sents: list) -> bool:
-    """
-    Deteksi apakah kalimat ini memperkenalkan event/topik baru.
-    Kriteria: mengandung topic shift marker DAN subjek berbeda dari
-    kalimat sebelumnya (heuristik sederhana: kata benda kapital baru).
-    """
-    if not _TOPIC_SHIFT_MARKERS.search(sent):
-        return False
-    # Cek apakah ada entitas kapital baru yang tidak muncul di kalimat sebelumnya
-    prev_text = " ".join(prev_sents).lower()
-    new_caps = re.findall(r'\b[A-Z][a-z]{2,}\b', sent)
-    for cap in new_caps:
-        if cap.lower() not in prev_text:
-            return True
-    return False
-
-
-def extract_what(content: str, title: str) -> str:
-    """
-    WHAT: Prioritaskan kalimat pertama yang informatif (lead sentence).
-    Jika artikel berisi multi-event (ada topic shift marker yang jelas),
-    tambahkan sinyal event kedua sebagai konteks.
-
-    Return: string kalimat utama (+ konteks event kedua jika ada dan singkat).
-    """
-    sentences = _split_sentences(content)
-
-    lead = None
-    for sent in sentences[:5]:
-        sent = sent.strip()
-        if len(sent) < 30:
-            continue
-        if _is_scraping_artifact(sent):
-            continue
-        if re.search(r"(klik|follow|download|subscribe|simak|lihat juga)", sent, re.IGNORECASE):
-            continue
-
-        # Batasi panjang dengan potong rapi di batas klausa (tanda baca)
-        if len(sent) > 250:
-            truncated = sent[:250]
-            last_punct = max(truncated.rfind(','), truncated.rfind('.'), truncated.rfind(';'))
-            if last_punct > 80:
-                sent = truncated[:last_punct] + ('.' if truncated[last_punct] != '.' else '')
-
-        lead = sent
-        break
-
-    if not lead:
-        return title if title else NOT_FOUND
-
-    # Deteksi event kedua — scan proporsional terhadap panjang artikel
-    # Batas: 60% dari total kalimat, minimal sampai kalimat ke-15,
-    # maksimal kalimat ke-30. Artikel pendek (< 15 kalimat) tetap aman.
-    total = len(sentences)
-    scan_end = max(15, min(30, int(total * 0.6)))
-    second_event = None
-    for sent in sentences[5:scan_end]:
-        sent = sent.strip()
-        if len(sent) < 30 or _is_scraping_artifact(sent):
-            continue
-        if _is_new_event_sentence(sent, sentences[:5]):
-            if len(sent) > 200:
-                truncated = sent[:200]
-                last_punct = max(truncated.rfind(','), truncated.rfind('.'), truncated.rfind(';'))
-                if last_punct > 60:
-                    sent = truncated[:last_punct] + ('.' if truncated[last_punct] != '.' else '')
-            second_event = sent
-            break
-
-    if second_event:
-        return f"{lead} Selain itu, {second_event[0].lower()}{second_event[1:]}"
-
-    return lead
 
 
 # =============================================================================
@@ -198,9 +89,9 @@ def extract_when(content: str, metadata_date: str) -> List[str]:
     """WHEN dengan deduplikasi."""
     found = []
     seen = set()
-    
+
     clean_content = re.sub(r'(\d+)[–—](\d+)', r'\1-\2', content)
-    
+
     for pattern in DATE_PATTERNS:
         for match in pattern.finditer(clean_content):
             date_str = match.group(0).strip()
@@ -208,7 +99,7 @@ def extract_when(content: str, metadata_date: str) -> List[str]:
             if key not in seen:
                 seen.add(key)
                 found.append(date_str)
-    
+
     if found:
         found.sort(key=len, reverse=True)
         deduped = []
@@ -216,10 +107,10 @@ def extract_when(content: str, metadata_date: str) -> List[str]:
             if not any(d in existing for existing in deduped):
                 deduped.append(d)
         return deduped[:3]
-    
+
     if metadata_date:
         return [_format_metadata_date(str(metadata_date))]
-    
+
     return [NOT_FOUND]
 
 
@@ -230,7 +121,7 @@ def extract_5w1h(article: Dict[str, Any]) -> Dict[str, Any]:
     title = str(article.get("title", "") or "")
     content = str(article.get("content", "") or "")
     metadata_date = article.get("date")
-    
+
     if not content.strip():
         return {
             "what": NOT_FOUND,
@@ -240,17 +131,14 @@ def extract_5w1h(article: Dict[str, Any]) -> Dict[str, Any]:
             "why": NOT_FOUND,
             "how": NOT_FOUND,
         }
-    
+
     clean_content, dateline_location = _strip_dateline(content)
-    
+
     where_result = extract_where(clean_content, dateline_location=dateline_location)
     who_result = extract_who(clean_content, title=title)
-    
-    # WHAT dihitung duluan agar bisa di-pass ke HOW untuk anti-duplikasi
+
     what_result = extract_what(clean_content, title)
 
-    # HOW dihitung sebelum WHY — hasilnya di-pass ke extract_why supaya
-    # WHY bisa exclude kalimat yang sudah dipakai HOW
     how_result = extract_how(clean_content, title, what_sentence=what_result)
 
     return {
@@ -278,7 +166,7 @@ if __name__ == "__main__":
             "date": "2023-03-31"
         }
     ]
-    
+
     for article in test_articles:
         result = extract_5w1h(article)
         print("\n" + "="*70)

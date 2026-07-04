@@ -15,6 +15,7 @@ import re
 
 from .patterns import TITLE_PREFIXES, REPORTING_VERBS, KNOWN_ORGS, SCRAPING_ARTIFACTS
 from .gazetteer import load_locations
+from extraction.text_utils import split_sentences
 
 # Pola frasa kapital berurutan: 2-4 kata diawali huruf besar
 _CAP_PHRASE_PATTERN = re.compile(r"\b([A-Z][a-zA-Z\.]+(?:\s+[A-Z][a-zA-Z\.]+){1,3})\b")
@@ -77,10 +78,6 @@ _PERSON_NAME_INDICATORS = {
     "yenny", "yusuf", "yustinus",
     "zulkifli",
 }
-
-
-def _split_sentences(text):
-    return re.split(r"(?<=[.!?])\s+", text)
 
 
 def _is_partial_title(phrase):
@@ -195,7 +192,7 @@ def _score_who_candidates(content, title=""):
     if not content:
         return None
 
-    sentences = _split_sentences(content)
+    sentences = split_sentences(content)
     candidates = {}
 
     for sent_idx, sent in enumerate(sentences[:10]):  # fokus 10 kalimat pertama
