@@ -1,43 +1,67 @@
 """
-how_extractor.py — v4 (3-Layer Architecture, sinkron patterns.py)
+how_extractor.py — v5 (POS Tagging + BERTScore sebagai Layer utama)
 ====================================================================
-Arsitektur tetap 3-layer sesuai plan-how-extractor.md:
+Arsitektur berlapis:
+
+Layer 0 — POS Tagging (extraction.pos_tagger) untuk mengidentifikasi
+          kalimat yang mengandung verba, lalu di-ranking dengan BERTScore
+          (extraction.text_similarity) terhadap HOW_PROTOTYPES. Ambil
+          top-3 kandidat tertinggi -- ini LAYER UTAMA sesuai revisi
+          terbaru (catatan dosen).
 
 Layer 1 — Pattern gramatikal (bersumber dari extraction.patterns:
           METHOD_CONNECTORS, METHOD_VERB_PATTERN, SECARA_METHOD_PATTERN).
+          Jaring pengaman jika Layer 0 tidak menemukan kandidat.
 
-Layer 2 — Semantic similarity (sentence-transformers) sebagai TIE-BREAKER.
+Layer 2 — Semantic similarity (sentence-transformers) sebagai TIE-BREAKER
+          untuk Layer 1.
 
-Layer 3 — Fallback posisi: ambil kalimat ke-2/3 artikel jika Layer 1
-          kosong, TAPI SEKARANG memfilter kalimat status/fakta (mis.
-          "X telah ditetapkan sebagai Y", "X dinyatakan sebagai Y") yang
-          bukan penjelasan cara/proses meski lolos syarat panjang/posisi.
+Layer 3 — Fallback posisi: ambil kalimat ke-2/3 artikel jika Layer 0 & 1
+          kosong, dengan filter kalimat status/fakta (mis. "X telah
+          ditetapkan sebagai Y") yang bukan penjelasan cara/proses.
           Jika SEMUA kandidat fallback adalah status/fakta murni, extractor
-          mengembalikan NOT_FOUND — lebih jujur daripada memaksakan
-          kalimat yang bukan HOW ("no answer" lebih baik dari jawaban
-          salah, terutama untuk artikel yang memang tidak menjelaskan cara,
-          seperti artikel pernyataan/opini politik).
+          mengembalikan NOT_FOUND -- lebih jujur daripada memaksakan
+          kalimat yang bukan HOW.
 
-Anti-duplikasi: cosine similarity kandidat HOW vs WHAT; buang jika > 0.85.
+Anti-duplikasi: BERTScore (seluruh kalimat) kandidat HOW vs WHAT via
+extraction.text_similarity; buang jika skor > WHAT_DEDUP_THRESHOLD.
 
-Changelog v4:
-  1. TAMBAH _is_status_fact_sentence(): filter kalimat yang berisi
-     verba penetapan status (ditetapkan sebagai/menjadi, dinyatakan
-     sebagai, ditunjuk sebagai, dinobatkan sebagai, dll) TANPA disertai
-     penanda proses/cara apapun. Kalimat semacam ini adalah FAKTA LATAR,
-     bukan HOW, dan sebelumnya lolos ke Layer 3 fallback karena hanya
-     dicek panjang kata & posisi.
-  2. _fallback_positional() sekarang skip kalimat status/fakta murni.
-     Jika window kalimat ke-2..4 habis tanpa kandidat valid, extractor
-     mengembalikan NOT_FOUND alih-alih memaksakan kalimat ke-berapa pun
-     yang tersisa (perilaku lama: "kalimat APAPUN yang valid" — DIHAPUS
-     karena inilah sumber false positive "ditetapkan sebagai tuan rumah").
-  3. HOW_FALLBACK_CONNECTORS ("usai", "setelah") tetap diprioritaskan
-     lebih dulu sebelum fallback biasa.
+Changelog v5.1 (bugfix):
+  1. FIX false-positive Layer 0: syarat "ada verba" TERLALU LONGGAR (hampir
+     semua kalimat berita punya verba, termasuk kalimat non-proses seperti
+     "KPK belum bersedia mengumumkan..."). Kandidat sekarang WAJIB juga
+     lolos _has_process_indicator() (verba proses konkret: menggeledah,
+     menyita, memeriksa, menyelidiki, dst.) SEBELUM di-ranking BERTScore.
+     POS tagging + BERTScore kini berfungsi sebagai RE-RANKER atas kandidat
+     yang sudah masuk akal, bukan penyaring dari nol semua kalimat berverba.
+
+Changelog v5:
+  1. TAMBAH Layer 0: _find_verb_bertscore_candidates() -- POS tagging
+     (extraction.pos_tagger.sentence_has_verb) + BERTScore terhadap
+     HOW_PROTOTYPES, ambil top-3 kandidat berverba dengan skor tertinggi.
+     Ini LAYER UTAMA baru; Layer 1 (regex pattern) & Layer 3 (posisi)
+     jadi jaring pengaman jika Layer 0 kosong.
+  2. TAMBAH extract_how_candidates() -- API publik untuk mengambil
+     top-3 kandidat (bukan cuma jawaban tunggal), untuk keperluan
+     UI/evaluasi.
+  3. Anti-duplikasi WHAT vs HOW sekarang pakai BERTScore penuh
+     (extraction.text_similarity), bukan cosine similarity 1 pasangan
+     kalimat saja.
+
+Changelog v4 (dipertahankan):
+  1. _is_status_fact_sentence(): filter kalimat verba penetapan status
+     (ditetapkan sebagai/menjadi, dst.) TANPA penanda proses/cara lain.
+  2. _fallback_positional() skip kalimat status/fakta murni; kalau window
+     habis tanpa kandidat valid, extractor mengembalikan NOT_FOUND.
+  3. HOW_FALLBACK_CONNECTORS ("usai", "setelah") diprioritaskan lebih dulu.
 
 Dependencies:
+- transformers (opsional, POS tagging -- fallback heuristik morfologi
+  jika model/koneksi tidak tersedia)
+- bert-score (opsional, BERTScore -- fallback cosine similarity /
+  word-overlap jika tidak tersedia)
 - sentence-transformers  (opsional, reuse dari semantic_search.py)
-- scikit-learn           (opsional, untuk cosine_similarity)
+- scikit-learn           (opsional, untuk cosine_similarity fallback)
 """
 
 import re
@@ -51,6 +75,8 @@ from extraction.patterns import (
     is_valid_how_secara,
     is_valid_how_dengan,
 )
+from extraction.text_similarity import bertscore_similarity
+from extraction.pos_tagger import sentence_has_verb
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded model
@@ -145,8 +171,95 @@ def _get_embed_model():
 
 
 # =============================================================================
-# LAYER 1 — Grammatical Pattern Matching (sumber: patterns.py)
+# LAYER 0 — POS Tagging (verba) + BERTScore relevansi -> top-3 kandidat
 # =============================================================================
+# Sesuai catatan dosen:
+#   1. Lakukan POS Tagging untuk mengidentifikasi kata kerja (verb).
+#   2. Gunakan BERTScore untuk mencari kalimat yang paling relevan
+#      (relevan terhadap konsep "cara/proses" -- diwakili HOW_PROTOTYPES).
+#   3. Pilih 3 kalimat dengan skor tertinggi yang mengandung kata kerja
+#      sebagai kandidat jawaban HOW.
+HOW_TOP_N = 3
+
+
+def _find_verb_bertscore_candidates(
+    sentences: List[str],
+    embed_model,
+    top_n: int = HOW_TOP_N,
+) -> List[dict]:
+    """
+    Layer 0: filter kalimat yang mengandung verba (POS tagging), lalu
+    ranking berdasarkan BERTScore terhadap HOW_PROTOTYPES (kalimat
+    prototipe "cara/proses"), ambil top-N sebagai kandidat jawaban HOW.
+    """
+    scored = []
+    for idx, sent in enumerate(sentences):
+        if len(sent) < MIN_SENT_LEN or len(sent.split()) < MIN_WORD_COUNT:
+            continue
+        if is_scraping_artifact(sent):
+            continue
+        if not sentence_has_verb(sent):
+            continue
+
+        # PENTING: "ada verba" saja terlalu longgar -- hampir semua kalimat
+        # berita punya kata kerja (mis. "KPK belum bersedia mengumumkan...").
+        # Kalimat WAJIB juga punya indikator proses/cara yang sudah dikenal
+        # (pola instrumental Layer 1: "dengan cara", "melalui", "secara X",
+        # dst. -- lihat _has_process_indicator). Verba + BERTScore hanya
+        # dipakai untuk MERANKING kandidat yang SUDAH masuk akal ini, bukan
+        # untuk menyaring dari nol semua kalimat berverba.
+        if not _has_process_indicator(sent):
+            continue
+
+        # BERTScore relevansi: skor tertinggi kalimat ini vs SELURUH
+        # kalimat prototipe HOW (bukan cuma dibandingkan ke 1 kalimat).
+        proto_scores = [
+            bertscore_similarity(sent, proto, embed_model=embed_model)
+            for proto in HOW_PROTOTYPES
+        ]
+        best_score = max(proto_scores) if proto_scores else 0.0
+
+        scored.append({
+            "text": sent,
+            "index": idx,
+            "bertscore": best_score,
+            "pattern_score": best_score,  # dipakai kompatibel dgn sort di layer lain
+            "source": "pos_bertscore",
+        })
+
+    scored.sort(key=lambda c: (-c["bertscore"], c["index"]))
+    return scored[:top_n]
+
+
+def extract_how_candidates(
+    content: str,
+    what_sentence: str = "",
+    top_n: int = HOW_TOP_N,
+) -> List[dict]:
+    """
+    API publik: kembalikan top-N (default 3) kandidat jawaban HOW hasil
+    POS Tagging (verba) + BERTScore, sudah difilter status/fakta &
+    duplikasi vs WHAT. Berguna untuk ditampilkan di UI/evaluasi, bukan
+    cuma jawaban tunggal seperti extract_how().
+
+    Returns:
+        List[dict] -- masing-masing {"text": str, "bertscore": float}
+    """
+    if not content:
+        return []
+    sentences = split_sentences(content)
+    if not sentences:
+        return []
+
+    embed_model = _get_embed_model()
+    candidates = _find_verb_bertscore_candidates(sentences, embed_model, top_n=top_n * 2)
+    candidates = [c for c in candidates if not _is_status_fact_sentence(c["text"])]
+    candidates = _filter_what_duplicates(candidates, what_sentence, embed_model)
+
+    return [{"text": c["text"], "bertscore": c["bertscore"]} for c in candidates[:top_n]]
+
+
+
 def _score_instrumental_patterns(sentence: str) -> float:
     total_score = 0.0
     sent_lower = sentence.lower()
@@ -218,18 +331,16 @@ def _rank_by_similarity_to_prototypes(candidates, embed_model, prototypes=HOW_PR
 # ANTI-DUPLIKASI WHAT vs HOW
 # =============================================================================
 def _is_similar_to_what(candidate_text, what_sentence, embed_model, threshold=WHAT_DEDUP_THRESHOLD):
-    if not what_sentence or embed_model is None:
-        if what_sentence:
-            cand_words = set(re.findall(r'\w{3,}', candidate_text.lower()))
-            what_words = set(re.findall(r'\w{3,}', what_sentence.lower()))
-            if what_words:
-                overlap_ratio = len(cand_words & what_words) / len(what_words)
-                return overlap_ratio > 0.8
+    """
+    Cek kemiripan kandidat HOW vs kalimat WHAT menggunakan BERTScore
+    (extraction.text_similarity.bertscore_similarity), yang membandingkan
+    SELURUH kalimat pada kedua teks -- bukan cuma 1 pasangan kalimat
+    dibandingkan secara terbatas. Fallback otomatis ke cosine similarity
+    SentenceTransformer, lalu word-overlap, jika BERTScore tidak tersedia.
+    """
+    if not what_sentence:
         return False
-
-    from sklearn.metrics.pairwise import cosine_similarity as cos_sim
-    embeddings = embed_model.encode([candidate_text, what_sentence], convert_to_numpy=True)
-    sim = cos_sim([embeddings[0]], [embeddings[1]])[0][0]
+    sim = bertscore_similarity(candidate_text, what_sentence, embed_model=embed_model)
     return sim > threshold
 
 
@@ -321,10 +432,12 @@ def _fallback_positional(sentences: List[str], what_sentence: str, embed_model) 
 # =============================================================================
 def extract_how(content: str, title: str = "", what_sentence: str = "") -> str:
     """
-    Ekstraksi HOW dengan arsitektur 3-layer.
-    v4: fallback Layer 3 lebih jujur — mengembalikan NOT_FOUND untuk
-    artikel yang memang tidak menjelaskan cara/metode/proses, daripada
-    memaksakan kalimat status/fakta yang kebetulan berada di posisi awal.
+    Ekstraksi HOW dengan arsitektur berlapis.
+    v5: Layer 0 baru -- POS Tagging (verba) + BERTScore terhadap
+    HOW_PROTOTYPES, ambil top-3 kandidat, pilih yang berskor tertinggi.
+    Layer 1 (pattern gramatikal) dan Layer 3 (fallback posisi) tetap
+    dipertahankan sebagai jaring pengaman jika Layer 0 tidak menemukan
+    kalimat berverba yang relevan sama sekali.
     """
     if not content:
         return NOT_FOUND
@@ -335,6 +448,14 @@ def extract_how(content: str, title: str = "", what_sentence: str = "") -> str:
 
     embed_model = _get_embed_model()
 
+    # --- Layer 0: POS Tagging (verba) + BERTScore -> top-3 ---
+    verb_candidates = _find_verb_bertscore_candidates(sentences, embed_model, top_n=HOW_TOP_N)
+    verb_candidates = [c for c in verb_candidates if not _is_status_fact_sentence(c["text"])]
+    verb_candidates = _filter_what_duplicates(verb_candidates, what_sentence, embed_model)
+    if verb_candidates:
+        return verb_candidates[0]["text"]
+
+    # --- Layer 1+2: Pattern gramatikal + semantic similarity tie-breaker ---
     candidates = _find_pattern_candidates(sentences)
     candidates = _filter_what_duplicates(candidates, what_sentence, embed_model)
 
@@ -343,6 +464,7 @@ def extract_how(content: str, title: str = "", what_sentence: str = "") -> str:
             candidates = _rank_by_similarity_to_prototypes(candidates, embed_model)
         return candidates[0]["text"]
 
+    # --- Layer 3: fallback posisi ---
     fallback = _fallback_positional(sentences, what_sentence, embed_model)
     if fallback:
         return fallback

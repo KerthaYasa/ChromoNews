@@ -24,6 +24,7 @@ from extraction.patterns import (
     is_valid_why_untuk,
 )
 from extraction.text_utils import split_sentences
+from extraction.text_similarity import bertscore_similarity
 
 # =============================================================================
 # MARKER KAUSAL RELASIONAL — "berkaitan dengan" / "terkait dengan"
@@ -115,21 +116,24 @@ def _is_excluded(sentence: str, exclusions: List[str]) -> bool:
 
 
 def _is_similar_to(candidate, reference, embed_model, threshold=_COSINE_THRESHOLD):
+    """
+    Cek kemiripan kandidat WHY vs kalimat referensi (WHAT/HOW) menggunakan
+    BERTScore (extraction.text_similarity.bertscore_similarity), yang
+    membandingkan SELURUH kalimat pada kedua teks -- bukan hanya 1 pasangan
+    kalimat terbatas. Fallback otomatis ke cosine similarity
+    SentenceTransformer, lalu word-overlap, jika BERTScore tidak tersedia.
+    """
     if not reference:
         return False
-    if embed_model is not None:
-        try:
-            from sklearn.metrics.pairwise import cosine_similarity as cos_sim
-            embeddings = embed_model.encode([candidate, reference], convert_to_numpy=True)
-            sim = cos_sim([embeddings[0]], [embeddings[1]])[0][0]
-            return float(sim) > threshold
-        except Exception:
-            pass
-    cand_words = set(re.findall(r'\w{3,}', candidate.lower()))
-    ref_words = set(re.findall(r'\w{3,}', reference.lower()))
-    if not ref_words:
-        return False
-    return len(cand_words & ref_words) / len(ref_words) > _WORD_OVERLAP_THRESHOLD
+    try:
+        sim = bertscore_similarity(candidate, reference, embed_model=embed_model)
+        return sim > threshold
+    except Exception:
+        cand_words = set(re.findall(r'\w{3,}', candidate.lower()))
+        ref_words = set(re.findall(r'\w{3,}', reference.lower()))
+        if not ref_words:
+            return False
+        return len(cand_words & ref_words) / len(ref_words) > _WORD_OVERLAP_THRESHOLD
 
 
 def _filter_duplicates(candidates, what_sentence, how_sentence, embed_model):

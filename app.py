@@ -8,6 +8,7 @@ from semantic_search import load_embedding_model, encode_corpus, search_semantic
 from hybrid_search import reciprocal_rank_fusion
 from extraction.rule_based_5w1h import extract_5w1h, inject_ner_pipeline
 from paraphraser import configure_gemini, paraphrase_5w1h, _fallback_paragraph
+import history_manager
 
 # =============================================================================
 # KONFIGURASI HALAMAN
@@ -34,6 +35,10 @@ if 'top_k' not in st.session_state:
     st.session_state.top_k = 5
 if 'rrf_k' not in st.session_state:
     st.session_state.rrf_k = 60
+if 'history' not in st.session_state:
+    st.session_state.history = history_manager.load_history()
+if 'viewing_history_entry' not in st.session_state:
+    st.session_state.viewing_history_entry = None
 
 # =============================================================================
 # THEME COLORS
@@ -557,11 +562,72 @@ with col2:
 if search_clicked and query:
     st.session_state.query = query
     st.session_state.search_performed = True
+    st.session_state.viewing_history_entry = None
+
+# =============================================================================
+# RENDER ARTICLE CARD (reusable: dipakai di tab Hasil & tab Riwayat)
+# =============================================================================
+def render_article_card(art, index):
+    w5h1 = art.get('w5h1', {})
+
+    st.markdown(f"""
+    <div class="article-card">
+        <div class="article-title">{index+1}. {art['title']}</div>
+        <div class="article-meta">
+            <span class="article-date">🕒 {art['date']}</span>
+            <span class="article-score">📊 RRF: {float(art.get('score', 0.0)):.4f}</span>
+        </div>
+    """, unsafe_allow_html=True)
+
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        def fmt(v):
+            if not v or "Tidak disebutkan" in str(v):
+                return "<em style='color:{};'>Tidak terdeteksi</em>".format(text_muted)
+            if isinstance(v, list):
+                cleaned = [x for x in v if x and "Tidak disebutkan" not in x]
+                if not cleaned:
+                    return "<em style='color:{};'>Tidak terdeteksi</em>".format(text_muted)
+                return " • ".join(cleaned)
+            return str(v)
+
+        st.markdown(f"""
+        <span class="w5h1-label">🔍 Informasi Terstruktur</span>
+        <div class="w5h1-grid">
+            <div class="w5h1-item"><span class="w5h1-badge badge-what">WHAT</span>
+                <span class="w5h1-text">{fmt(w5h1.get('what'))}</span></div>
+            <div class="w5h1-item"><span class="w5h1-badge badge-who">WHO</span>
+                <span class="w5h1-text">{fmt(w5h1.get('who'))}</span></div>
+            <div class="w5h1-item"><span class="w5h1-badge badge-when">WHEN</span>
+                <span class="w5h1-text">{fmt(w5h1.get('when'))}</span></div>
+            <div class="w5h1-item"><span class="w5h1-badge badge-where">WHERE</span>
+                <span class="w5h1-text">{fmt(w5h1.get('where'))}</span></div>
+            <div class="w5h1-item"><span class="w5h1-badge badge-why">WHY</span>
+                <span class="w5h1-text">{fmt(w5h1.get('why'))}</span></div>
+            <div class="w5h1-item"><span class="w5h1-badge badge-how">HOW</span>
+                <span class="w5h1-text">{fmt(w5h1.get('how'))}</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_right:
+        st.markdown(f"""
+        <div class="paraphrase-box">
+            <span class="paraphrase-label">📝 Ringkasan</span>
+            {art.get('paragraph', '')}
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.expander("📖 Baca Selengkapnya"):
+        st.write(art.get('content', ''))
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("---")
 
 # =============================================================================
 # TABS
 # =============================================================================
-tab_hasil, tab_dataset = st.tabs(["📝 Hasil & Ringkasan", "📂 Dataset"])
+tab_hasil, tab_riwayat, tab_dataset = st.tabs(["📝 Hasil & Ringkasan", "🕘 Riwayat", "📂 Dataset"])
 
 # =============================================================================
 # TAB 1: HASIL & RINGKASAN
@@ -626,65 +692,13 @@ with tab_hasil:
         st.caption(f"⚙️ Ekstraksi: {extract_time:.2f}s • AI: {'✅ Aktif' if ai_ready else '⏸️ Nonaktif'}")
         
         for i, art in enumerate(retrieved_articles):
-            w5h1 = art['w5h1']
-            
-            # ===== ARTICLE CARD =====
-            st.markdown(f"""
-            <div class="article-card">
-                <div class="article-title">{i+1}. {art['title']}</div>
-                <div class="article-meta">
-                    <span class="article-date">🕒 {art['date']}</span>
-                    <span class="article-score">📊 RRF: {art['score']:.4f}</span>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            # ===== 5W1H + PARAPHRASE =====
-            col_left, col_right = st.columns([1, 1])
-            
-            with col_left:
-                def fmt(v):
-                    if not v or "Tidak disebutkan" in str(v):
-                        return "<em style='color:{};'>Tidak terdeteksi</em>".format(text_muted)
-                    if isinstance(v, list):
-                        cleaned = [x for x in v if x and "Tidak disebutkan" not in x]
-                        if not cleaned:
-                            return "<em style='color:{};'>Tidak terdeteksi</em>".format(text_muted)
-                        return " • ".join(cleaned)
-                    return str(v)
-                
-                st.markdown(f"""
-                <span class="w5h1-label">🔍 Informasi Terstruktur</span>
-                <div class="w5h1-grid">
-                    <div class="w5h1-item"><span class="w5h1-badge badge-what">WHAT</span>
-                        <span class="w5h1-text">{fmt(w5h1.get('what'))}</span></div>
-                    <div class="w5h1-item"><span class="w5h1-badge badge-who">WHO</span>
-                        <span class="w5h1-text">{fmt(w5h1.get('who'))}</span></div>
-                    <div class="w5h1-item"><span class="w5h1-badge badge-when">WHEN</span>
-                        <span class="w5h1-text">{fmt(w5h1.get('when'))}</span></div>
-                    <div class="w5h1-item"><span class="w5h1-badge badge-where">WHERE</span>
-                        <span class="w5h1-text">{fmt(w5h1.get('where'))}</span></div>
-                    <div class="w5h1-item"><span class="w5h1-badge badge-why">WHY</span>
-                        <span class="w5h1-text">{fmt(w5h1.get('why'))}</span></div>
-                    <div class="w5h1-item"><span class="w5h1-badge badge-how">HOW</span>
-                        <span class="w5h1-text">{fmt(w5h1.get('how'))}</span></div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col_right:
-                st.markdown(f"""
-                <div class="paraphrase-box">
-                    <span class="paraphrase-label">📝 Ringkasan {'' if ai_ready else '(Fallback)'}</span>
-                    {art['paragraph']}
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # ===== EXPANDER =====
-            with st.expander("📖 Baca Selengkapnya"):
-                st.write(art['content'])
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown("---")
-        
+            render_article_card(art, i)
+
+        # ===== SIMPAN KE HISTORY =====
+        st.session_state.history = history_manager.add_entry(
+            query, retrieved_articles, history=st.session_state.history
+        )
+
         st.session_state.search_performed = False
     
     else:
@@ -704,7 +718,44 @@ with tab_hasil:
         """, unsafe_allow_html=True)
 
 # =============================================================================
-# TAB 2: DATASET
+# TAB 2: RIWAYAT (History)
+# =============================================================================
+with tab_riwayat:
+    st.markdown("### 🕘 Riwayat Pencarian")
+    st.caption("Lihat kembali hasil pencarian & ekstraksi 5W1H sebelumnya, tanpa perlu mencari ulang.")
+
+    if not st.session_state.history:
+        st.markdown(f"""
+        <div class="empty-state">
+            <div class="empty-state-icon">🕘</div>
+            <div class="empty-state-title">Belum Ada Riwayat</div>
+            <div class="empty-state-desc">
+                Riwayat pencarian kamu akan muncul di sini setelah melakukan pencarian.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        col_a, col_b = st.columns([4, 1])
+        with col_a:
+            st.caption(f"Total {len(st.session_state.history)} riwayat pencarian tersimpan (maks. {history_manager.MAX_HISTORY_ENTRIES}).")
+        with col_b:
+            if st.button("🗑️ Hapus Riwayat", use_container_width=True):
+                st.session_state.history = history_manager.clear_history()
+                st.session_state.viewing_history_entry = None
+                st.rerun()
+
+        for h_idx, entry in enumerate(st.session_state.history):
+            header = f"🔍 \"{entry['query']}\" — {entry['n_results']} artikel • {entry['timestamp']}"
+            with st.expander(header, expanded=(h_idx == 0 and st.session_state.viewing_history_entry == h_idx)):
+                if st.button("👁️ Tampilkan hasil ini", key=f"show_history_{h_idx}"):
+                    st.session_state.viewing_history_entry = h_idx
+
+                if st.session_state.viewing_history_entry == h_idx:
+                    for i, art in enumerate(entry["articles"]):
+                        render_article_card(art, i)
+
+# =============================================================================
+# TAB 3: DATASET
 # =============================================================================
 with tab_dataset:
     st.markdown("### 📊 Informasi Dataset")

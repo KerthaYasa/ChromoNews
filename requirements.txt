@@ -8,6 +8,21 @@ streamlit>=1.30.0
 Sastrawi>=1.0.1
 python-dotenv>=1.0.0
 
+# --- Untuk Textual Similarity (BERTScore, seluruh kalimat artikel) ---
+# Dipakai di extraction/text_similarity.py untuk anti-duplikasi WHAT/WHY/HOW
+# dan validasi hasil sistem vs AI (evaluation). Model default multilingual:
+# "bert-base-multilingual-cased" (di-download otomatis dari HuggingFace saat
+# pertama dipakai). Jika gagal load, otomatis fallback ke cosine similarity
+# SentenceTransformer, lalu word-overlap.
+bert-score>=0.3.13
+
+# --- Untuk POS Tagging Bahasa Indonesia (deteksi verba, ekstraksi HOW) ---
+# Dipakai di extraction/pos_tagger.py. Model "w11wo/indonesian-roberta-base-
+# posp-tagger" di-download otomatis dari HuggingFace saat pertama dipakai
+# (reuse transformers+torch yang sudah ada di requirements ini untuk NER).
+# Jika gagal load, otomatis fallback ke heuristik morfologi afiks verba
+# Indonesia (me-/ber-/di-/ter-/per- ... -kan/-nya).
+
 # --- Untuk fitur NER model (WHO/WHERE extraction) ---
 # Opsional secara fungsional: kalau gagal install/load, app otomatis
 # fallback ke rule-based murni (lihat extraction/ner_model.py)
