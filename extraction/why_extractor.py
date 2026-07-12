@@ -2,13 +2,11 @@
 why_extractor.py
 ================
 Ekstraksi WHY (Mengapa) dengan konektor kausal.
-Sesuai masukan dosen: gunakan kata konektor "karena", "akibat", "disebabkan".
 
 Changelog:
-  v5 — Tambah marker relasional "berkaitan dengan" / "terkait dengan"
-       dengan disambiguasi konteks (lihat is_valid_why_relational).
-  v4 — Sinkronisasi penuh dengan patterns.py (REVISI v6).
-  v3 — Patch anti-duplikasi WHY vs WHAT dan WHY vs HOW.
+  v6 — Tambah WHY_PROTOTYPES dan Semantic Fallback agar sistem berusaha
+       menebak kalimat alasan meskipun tidak ada konektor kausal eksplisit.
+  v5 — Tambah marker relasional "berkaitan dengan" / "terkait dengan".
 """
 
 import re
@@ -27,16 +25,19 @@ from extraction.text_utils import split_sentences
 from extraction.text_similarity import bertscore_similarity
 
 # =============================================================================
-# MARKER KAUSAL RELASIONAL — "berkaitan dengan" / "terkait dengan"
+# BARU: WHY Prototypes untuk Semantic Fallback
 # =============================================================================
-# Marker ini TIDAK ditambahkan ke patterns.py CAUSAL_CONNECTORS_TIER2 karena
-# butuh disambiguasi khusus: "berkaitan dengan"/"terkait dengan" sangat umum
-# di berita Indonesia untuk menyatakan SEBAB dari sebuah peristiwa
-# ("Pembatalan ini berkaitan dengan sikap Gubernur..."), tapi juga sering
-# dipakai sebagai penghubung topik generik non-kausal ("terkait dengan hal
-# itu, DPR akan menggelar rapat"). Disambiguasi: valid sebagai WHY hanya
-# jika didahului NOMINA PERISTIWA/KEPUTUSAN (mis. "pembatalan ini", "hal
-# ini", "keputusan itu", "penolakan ini").
+WHY_PROTOTYPES = [
+    "Hal ini terjadi karena alasan tersebut.",
+    "Peristiwa ini disebabkan oleh faktor utama berikut.",
+    "Pemicu utama dari kejadian ini adalah adanya masalah.",
+    "Latar belakang pengambilan keputusan ini didasarkan pada alasan kuat.",
+    "Dampak ini terjadi akibat serangkaian penyebab sebelumnya."
+]
+
+# =============================================================================
+# MARKER KAUSAL RELASIONAL
+# =============================================================================
 RELATIONAL_CAUSAL_CONNECTORS = ["berkaitan dengan", "terkait dengan"]
 
 _RELATIONAL_SUBJECT_PATTERN = re.compile(
@@ -46,13 +47,7 @@ _RELATIONAL_SUBJECT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-
 def is_valid_why_relational(sentence: str) -> bool:
-    """
-    Cek apakah 'berkaitan dengan'/'terkait dengan' dalam kalimat menandakan
-    WHY (sebab suatu peristiwa/keputusan), bukan sekadar penghubung topik
-    generik. Valid jika didahului nomina peristiwa/keputusan.
-    """
     return bool(_RELATIONAL_SUBJECT_PATTERN.search(sentence))
 
 
@@ -116,13 +111,6 @@ def _is_excluded(sentence: str, exclusions: List[str]) -> bool:
 
 
 def _is_similar_to(candidate, reference, embed_model, threshold=_COSINE_THRESHOLD):
-    """
-    Cek kemiripan kandidat WHY vs kalimat referensi (WHAT/HOW) menggunakan
-    BERTScore (extraction.text_similarity.bertscore_similarity), yang
-    membandingkan SELURUH kalimat pada kedua teks -- bukan hanya 1 pasangan
-    kalimat terbatas. Fallback otomatis ke cosine similarity
-    SentenceTransformer, lalu word-overlap, jika BERTScore tidak tersedia.
-    """
     if not reference:
         return False
     try:
@@ -244,6 +232,29 @@ def extract_why(content: str, what_sentence: str = "", how_sentence: str = "") -
             if not _is_similar_to(clause, what_sentence, embed_model) and \
                not _is_similar_to(clause, how_sentence, embed_model):
                 return clause
+                
+        # =====================================================================
+        # BARU: Jaring Semantik Terakhir (Memaksa sistem mencari jawaban terdekat)
+        # =====================================================================
+        embed_model = _get_embed_model()
+        if embed_model:
+            best_why = None
+            highest_score = -1.0
+            
+            # Cari di kalimat ke-2 sampai terakhir (biasanya WHY tidak di kalimat awal)
+            for sent in filtered_sentences[1:]:
+                scores = [bertscore_similarity(sent, proto, embed_model) for proto in WHY_PROTOTYPES]
+                max_score = max(scores) if scores else 0
+                
+                if max_score > highest_score:
+                    highest_score = max_score
+                    best_why = sent
+                    
+            # Selama ada kemiripan sedikit saja (> 0.40), ambil!
+            if best_why and highest_score > 0.40:
+                if not _is_similar_to(best_why, what_sentence, embed_model) and not _is_similar_to(best_why, how_sentence, embed_model):
+                    return best_why
+
         return "Tidak disebutkan dalam artikel"
 
     if len(candidates) == 1:
@@ -266,38 +277,3 @@ def extract_why(content: str, what_sentence: str = "", how_sentence: str = "") -
 
     candidates.sort(key=lambda x: _TYPE_PRIORITY.get(x[0], 9))
     return candidates[0][1]
-
-
-if __name__ == "__main__":
-    test_cases = [
-        {
-            "title": "Piala Dunia U-20 Terancam Batal",
-            "content": (
-                "Indonesia telah ditetapkan sebagai tuan rumah Piala Dunia U-20 2023. "
-                "Namun, hal ini belakangan diragukan setelah FIFA membatalkan drawing "
-                "Piala Dunia U-20 di Bali. "
-                "Pembatalan ini berkaitan dengan sikap Gubernur Bali Wayan Koster yang "
-                "menolak keikutsertaan Timnas Israel."
-            ),
-            "what": "Indonesia telah ditetapkan sebagai tuan rumah Piala Dunia U-20 2023.",
-            "how": "",
-        },
-        {
-            "title": "Kebakaran gudang gegara korsleting listrik",
-            "content": (
-                "Kebakaran hebat melanda gudang tekstil di Tangerang pada Kamis dini hari. "
-                "Petugas menduga kebakaran terjadi gegara korsleting listrik pada instalasi tua."
-            ),
-            "what": "Kebakaran hebat melanda gudang tekstil di Tangerang pada Kamis dini hari.",
-            "how": "",
-        },
-    ]
-
-    print("=" * 70)
-    print("TEST WHY EXTRACTOR v5 (+ marker relasional)")
-    print("=" * 70)
-    for case in test_cases:
-        print(f"\nJUDUL : {case['title']}")
-        result = extract_why(case["content"], what_sentence=case.get("what", ""), how_sentence=case.get("how", ""))
-        print(f"WHY   : {result}")
-        print("-" * 70)
